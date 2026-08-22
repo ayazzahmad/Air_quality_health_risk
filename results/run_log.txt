@@ -1,0 +1,100 @@
+
+==============================================================================
+1. LOAD & DATA-QUALITY AUDIT
+==============================================================================
+max calendar gap within any city : 0 days
+dropped (history < 365 days)   : ['Aizawl', 'Bhopal', 'Chandigarh', 'Ernakulam', 'Kochi', 'Shillong']
+dropped (weight coverage < 70%) : {'Ahmedabad': 0.698, 'Mumbai': 0.394}
+rows flagged unscoreable         : 1,656
+cities retained (18)            : Amaravati, Amritsar, Bengaluru, Brajrajnagar, Chennai, Coimbatore, Delhi, Gurugram, Guwahati, Hyderabad, Jaipur, Jorapokhar, Kolkata, Lucknow, Patna, Talcher, Thiruvananthapuram, Visakhapatnam
+rows retained                    : 24,173
+
+==============================================================================
+2. TEMPORAL SPLIT
+==============================================================================
+train : 2015-01-01 -> 2019-09-23
+embargo gap of 7 days (2019-09-24 -> 2019-10-01) discarded,
+        so no training label is built from a test-period day
+test  : 2019-10-01 -> 2020-07-01
+
+==============================================================================
+3. COMPOSITE SCORE & CAUSAL FEATURES
+==============================================================================
+percentile-rank transform fitted on TRAIN rows only
+label = mean exposure over days t+1..t+7
+features use days <= t only; windows [3, 7, 14, 30] require full history
+rows with complete history + label: 19,955 of 24,173
+risk thresholds from TRAIN only   : Low <= 0.4032 < Moderate <= 0.5935 < High
+train rows 15,368 | test rows 4,482 | features 17
+
+class balance (train -> test):
+  Low        33.0% ->  38.9%
+  Moderate   33.0% ->  33.9%
+  High       34.0% ->  27.2%
+
+==============================================================================
+4. BASELINES
+==============================================================================
+majority class    acc 0.272  macroF1 0.142
+persistence       acc 0.737  macroF1 0.737
+  (persistence = 'next week looks like this week' -- the bar a forecaster must clear)
+
+==============================================================================
+5. MODELS
+==============================================================================
+logistic regression (scaled, in-pipeline)...
+  train macroF1 0.801 | test macroF1 0.750 | test acc 0.748
+
+random forest -- GridSearchCV over 30 configs,
+  forward-chaining TimeSeriesSplit, scored on macro F1...
+  best params : {'clf__max_depth': 4, 'clf__max_features': 'sqrt', 'clf__min_samples_leaf': 5, 'clf__n_estimators': 600}
+  best CV macroF1 : 0.775
+  train macroF1 0.800 | test macroF1 0.756 | test acc 0.751
+
+==============================================================================
+6. RESULTS vs BASELINES
+==============================================================================
+                        accuracy  macro F1
+majority class             0.272     0.142
+persistence                0.737     0.737
+logistic regression        0.748     0.750
+random forest              0.751     0.756
+
+best model beats persistence by +0.018 macro F1
+
+==============================================================================
+7. COVID-19 REGIME CHECK
+==============================================================================
+India's lockdown (2020-03-25) falls inside the test window and
+changed air quality sharply, so test metrics are split around it:
+  pre-lockdown   n= 3018  persistence macroF1 0.695  RF macroF1 0.710
+  lockdown       n= 1464  persistence macroF1 0.634  RF macroF1 0.657
+
+==============================================================================
+8. PERMUTATION IMPORTANCE (held-out test)
+==============================================================================
+  hrs_mean_3         +0.0198 +/- 0.0028
+  hrs_mean_7         +0.0112 +/- 0.0022
+  hrs_mean_14        +0.0103 +/- 0.0016
+  hrs_mean_30        +0.0055 +/- 0.0022
+  hrs_lag_1          +0.0026 +/- 0.0018
+  month_cos          +0.0016 +/- 0.0009
+  is_winter          +0.0007 +/- 0.0006
+  hrs_std_7          +0.0001 +/- 0.0003
+  weight_coverage    +0.0001 +/- 0.0002
+  dow_cos            +0.0000 +/- 0.0000
+  dow_sin            +0.0000 +/- 0.0000
+  voc_observed       -0.0000 +/- 0.0002
+
+==============================================================================
+9. ARTIFACTS
+==============================================================================
+  wrote confusion_matrix.png
+  wrote metrics.json
+  wrote model.joblib
+  wrote model_vs_baselines.png
+  wrote permutation_importance.csv
+  wrote permutation_importance.png
+  wrote run_log.txt
+
+done.
