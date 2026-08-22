@@ -6,8 +6,8 @@ Forecasting next-week air-pollution health risk (**Low / Moderate / High**) for
 This is a corrected rebuild of an earlier version of this project. The earlier
 version reported **89% accuracy**; that number was an artifact of building the
 label out of the same rolling window the features were computed from. Rebuilt as
-a genuine forecasting task, the honest number is **75.6% accuracy / 0.756 macro
-F1** — and only **+0.019 macro F1 above a trivial persistence rule**. Full
+a genuine forecasting task, the honest number is **75.1% accuracy / 0.756 macro
+F1** — and only **+0.018 macro F1 above a trivial persistence rule**. Full
 defect-by-defect accounting in [FIXES.md](FIXES.md).
 
 ## The task
@@ -31,8 +31,8 @@ during training or tuning).
 | Logistic regression | 0.748 | 0.750 |
 | **Random forest** (tuned) | **0.751** | **0.756** |
 
-**The honest headline: the tuned model beats persistence by 1.9 macro-F1
-points.** Pollution exposure is strongly autocorrelated, so most of what looks
+**The honest headline: the tuned model beats persistence by 1.8 macro-F1
+points** (0.7556 vs 0.7373). Pollution exposure is strongly autocorrelated, so most of what looks
 like predictive skill is just inertia. Any evaluation of this problem that omits
 the persistence baseline will overstate the model's contribution — which is
 exactly what happened in the original.
@@ -99,7 +99,8 @@ Permutation importance on held-out test data (drop in macro F1 when shuffled):
 Two corrections to claims made in the original write-up:
 
 - **Volatility carries essentially no signal** (`hrs_std_7` +0.0001,
-  `hrs_std_14` +0.0003). The original claimed "volatility provides secondary but
+  `hrs_std_14` **−0.0004** — shuffling it slightly *helps*, i.e. it is noise).
+  The original claimed "volatility provides secondary but
   meaningful signal" — that claim does not survive removing the leakage. It also
   could not have been assessed properly there, because that feature was computed
   on a series which had been accidentally overwritten by its own rolling mean.
@@ -155,7 +156,7 @@ absent produces a constant masquerading as a measurement.
 
 Methodological limits that remain, stated plainly:
 
-- **The margin over persistence is small** (+0.019 macro F1). This model is a
+- **The margin over persistence is small** (+0.018 macro F1). This model is a
   modest improvement on inertia, not a strong forecaster.
 - **Labels are relative, not clinical.** Risk levels are training-set exposure
   terciles, not medical or regulatory thresholds. There is no health-outcome
@@ -178,32 +179,45 @@ Methodological limits that remain, stated plainly:
 
 ```bash
 pip install -r requirements.txt
-python run.py                  # full pipeline
-python verify_no_leakage.py    # checks the anti-leakage invariants
+
+# the analysis, start to finish
+jupyter notebook notebooks/air_quality_health_risk_analysis.ipynb
+
+# or just check the anti-leakage invariants
+python verify_no_leakage.py
 ```
 
-`run.py` goes top to bottom from a clean interpreter in a few minutes and writes
-to `results/`: `metrics.json`, `run_log.txt`, `model.joblib`,
-`permutation_importance.csv`, and three plots. Verified deterministic — deleting
-`results/` and rerunning reproduces every metric to four decimal places.
+The notebook runs top to bottom from a clean kernel in a few minutes (the grid
+search is the slow part) and is committed with its outputs, so it reads without
+being executed. Verified deterministic — rerunning reproduces every metric to
+four decimal places.
 
 ```
+notebooks/
+  air_quality_health_risk_analysis.ipynb   the analysis, start to finish
 pipeline/
   config.py           all tunable constants and split dates
   data.py             loading, cleaning, data-quality gates
   features.py         composite score, causal features, forward label
   models.py           baselines, models, tuning, evaluation
-run.py                end-to-end entry point
 verify_no_leakage.py  executable checks on the core invariants
 data/city_day.csv     source data (~2.5 MB), so the project runs as cloned
-notebooks/            the original notebook, kept unchanged for provenance
 results/              generated outputs (model.joblib is gitignored)
 ```
 
-`notebooks/air_quality_health_risk_analysis.ipynb` is the original, flawed
-analysis, left in place deliberately so the claims in [FIXES.md](FIXES.md) can be
-checked against the code they describe. It does not run top to bottom — one of
-the defects listed there. Nothing in `pipeline/` imports it.
+The notebook is a thin narrative over `pipeline/`, rather than a self-contained
+script. Two reasons: the same code path is then covered by
+`verify_no_leakage.py`, and there is only one definition of each feature to keep
+correct. The original packed everything into notebook cells, which is how a
+variable came to be overwritten by its own rolling mean without anyone noticing
+(`FIXES.md` #7).
+
+The **pre-fix notebook is in git history** at commit `d73d3d2`, so the cell
+numbers cited throughout [FIXES.md](FIXES.md) still resolve:
+
+```bash
+git show d73d3d2:notebooks/air_quality_health_risk_analysis.ipynb > original.ipynb
+```
 
 ### Verified invariants
 
@@ -239,8 +253,15 @@ the features; the "chronological" split was actually alphabetical by city; the
 label thresholds, scaler and imputer were all fitted on the full dataset; and
 there was no baseline to compare against.
 
-Fixing those drops the number from 89% to 75.6%, and reveals that a one-line
+Fixing those drops accuracy from 89% to 75.1%, and reveals that a one-line
 persistence rule already achieves 73.7%. That is a much less impressive result
 and a much more useful one — it says what this data can actually support.
+
+Every figure quoted above is read from `results/metrics.json`, produced by the
+run in `notebooks/air_quality_health_risk_analysis.ipynb`. The notebook computes
+each number inline rather than restating it in prose, because during this
+rebuild I twice caught a hardcoded figure in *this README* drifting from what
+the pipeline actually returned after a config change — the same defect I flagged
+in the original (`FIXES.md` #24).
 
 The full list of defects and fixes, cell by cell, is in [FIXES.md](FIXES.md).

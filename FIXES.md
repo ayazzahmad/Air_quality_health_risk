@@ -1,8 +1,15 @@
 # Defect → fix mapping
 
-Every issue found in the original `notebooks/air_quality_health_risk_analysis.ipynb`,
-with the cell it occurred in and where it is addressed. Cell numbers refer to
-positional index in the original notebook.
+Every issue found in the original analysis, with the cell it occurred in and
+where it is addressed.
+
+`notebooks/air_quality_health_risk_analysis.ipynb` has since been **rewritten in
+place** as the corrected analysis. Cell numbers below are positional indices into
+the **pre-fix** notebook, which remains in git history at commit `d73d3d2`:
+
+```bash
+git show d73d3d2:notebooks/air_quality_health_risk_analysis.ipynb > original.ipynb
+```
 
 ## Tier 1 — invalidated the reported 89%
 
@@ -44,7 +51,7 @@ positional index in the original notebook.
 
 | # | Defect | Fix |
 |---|---|---|
-| 20 | **A fresh top-to-bottom run crashed.** Cell 24 plotted `Health_Risk_Score`/`HRS_7day`, created at cells 29/31. Proof of out-of-order execution: cell 6 — in Section 1 — printed a column list already containing `Health_Risk_Level` and `HRS_7day_std`, created at cells 40/44. | Linear, importable modules with a single entry point (`python run.py`), verified from a clean interpreter. |
+| 20 | **A fresh top-to-bottom run crashed.** Cell 24 plotted `Health_Risk_Score`/`HRS_7day`, created at cells 29/31. Proof of out-of-order execution: cell 6 — in Section 1 — printed a column list already containing `Health_Risk_Level` and `HRS_7day_std`, created at cells 40/44. | Notebook rewritten to run linearly from a clean kernel over importable modules in `pipeline/`, and committed with its outputs. |
 | 21 | **Hardcoded absolute path** `C:\Users\ayazp\Downloads\...` while the repo ships `data/city_day.csv`. | Relative paths resolved from the package root. `config.PROJECT_ROOT` |
 | 22 | **`!pip install scikit-learn` inside the notebook**; no `requirements.txt`. | `requirements.txt` added; no installs in code. |
 | 23 | **No saved model artifact** (`results/` held only PNGs). | Model, ranker and thresholds persisted to `results/model.joblib`; all metrics to `results/metrics.json`. |
