@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api           # only the final API stage is deployed
+    image: air-quality-risk-api:latest
+    container_name: air_quality_api
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_PATH=artifacts/model.joblib
+    # Optional: mount a local artifacts folder so you can update the model
+    # without rebuilding the image.
+    # volumes:
+    #   - ./artifacts:/app/artifacts:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
