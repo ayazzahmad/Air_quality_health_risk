@@ -1,0 +1,322 @@
+{
+  "data_audit": {
+    "dropped_insufficient_history": [
+      "Aizawl",
+      "Bhopal",
+      "Chandigarh",
+      "Ernakulam",
+      "Kochi",
+      "Shillong"
+    ],
+    "dropped_poor_coverage": {
+      "Ahmedabad": 0.698,
+      "Mumbai": 0.394
+    },
+    "rows_flagged_low_coverage": 1656,
+    "cities_retained": [
+      "Amaravati",
+      "Amritsar",
+      "Bengaluru",
+      "Brajrajnagar",
+      "Chennai",
+      "Coimbatore",
+      "Delhi",
+      "Gurugram",
+      "Guwahati",
+      "Hyderabad",
+      "Jaipur",
+      "Jorapokhar",
+      "Kolkata",
+      "Lucknow",
+      "Patna",
+      "Talcher",
+      "Thiruvananthapuram",
+      "Visakhapatnam"
+    ],
+    "rows_retained": 24173,
+    "max_calendar_gap_days": 0
+  },
+  "split": {
+    "train_rows": 15368,
+    "test_rows": 4482,
+    "train_end": "2019-09-24",
+    "test_start": "2019-10-01",
+    "thresholds": {
+      "low": 0.40318685012793526,
+      "high": 0.5934796872958479
+    },
+    "n_features": 17
+  },
+  "baselines": {
+    "majority": {
+      "accuracy": 0.2715305667112896,
+      "macro_f1": 0.1423641574545242,
+      "weighted_f1": 0.11596866105900666
+    },
+    "persistence": {
+      "accuracy": 0.7367246764837126,
+      "macro_f1": 0.7372653582529071,
+      "weighted_f1": 0.7364122961065471
+    }
+  },
+  "models": {
+    "logistic_regression": {
+      "model": "logistic_regression",
+      "train": {
+        "accuracy": 0.8003643935450286,
+        "macro_f1": 0.8006144629615394,
+        "weighted_f1": 0.8012807207650756
+      },
+      "test": {
+        "accuracy": 0.7483266398929049,
+        "macro_f1": 0.7501652501230277,
+        "weighted_f1": 0.7494358609634054
+      },
+      "test_report": {
+        "High": {
+          "precision": 0.8028052805280528,
+          "recall": 0.799506984387839,
+          "f1-score": 0.8011527377521613,
+          "support": 1217.0
+        },
+        "Low": {
+          "precision": 0.8186129223473622,
+          "recall": 0.7918577981651376,
+          "f1-score": 0.8050131157097056,
+          "support": 1744.0
+        },
+        "Moderate": {
+          "precision": 0.6317119393556538,
+          "recall": 0.6574621959237343,
+          "f1-score": 0.6443298969072165,
+          "support": 1521.0
+        },
+        "accuracy": 0.7483266398929049,
+        "macro avg": {
+          "precision": 0.7510433807436896,
+          "recall": 0.7496089928255704,
+          "f1-score": 0.7501652501230277,
+          "support": 4482.0
+        },
+        "weighted avg": {
+          "precision": 0.7508944272057986,
+          "recall": 0.7483266398929049,
+          "f1-score": 0.7494358609634054,
+          "support": 4482.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          1381,
+          348,
+          15
+        ],
+        [
+          297,
+          1000,
+          224
+        ],
+        [
+          9,
+          235,
+          973
+        ]
+      ],
+      "confusion_labels": [
+        "Low",
+        "Moderate",
+        "High"
+      ]
+    },
+    "random_forest": {
+      "model": "random_forest",
+      "train": {
+        "accuracy": 0.7980218636127017,
+        "macro_f1": 0.800021392955388,
+        "weighted_f1": 0.8006659597019956
+      },
+      "test": {
+        "accuracy": 0.751450245426149,
+        "macro_f1": 0.7555757644173031,
+        "weighted_f1": 0.7543486083756062
+      },
+      "test_report": {
+        "High": {
+          "precision": 0.8282740676496098,
+          "recall": 0.7847165160230074,
+          "f1-score": 0.8059071729957806,
+          "support": 1217.0
+        },
+        "Low": {
+          "precision": 0.829328404189772,
+          "recall": 0.7717889908256881,
+          "f1-score": 0.7995247995247995,
+          "support": 1744.0
+        },
+        "Moderate": {
+          "precision": 0.6254396248534584,
+          "recall": 0.7015121630506246,
+          "f1-score": 0.6612953207313295,
+          "support": 1521.0
+        },
+        "accuracy": 0.751450245426149,
+        "macro avg": {
+          "precision": 0.7610140322309468,
+          "recall": 0.7526725566331067,
+          "f1-score": 0.7555757644173031,
+          "support": 4482.0
+        },
+        "weighted avg": {
+          "precision": 0.7598509474874271,
+          "recall": 0.751450245426149,
+          "f1-score": 0.7543486083756062,
+          "support": 4482.0
+        }
+      },
+      "confusion_matrix": [
+        [
+          1346,
+          386,
+          12
+        ],
+        [
+          268,
+          1067,
+          186
+        ],
+        [
+          9,
+          253,
+          955
+        ]
+      ],
+      "confusion_labels": [
+        "Low",
+        "Moderate",
+        "High"
+      ]
+    }
+  },
+  "rf_best_params": {
+    "clf__max_depth": "4",
+    "clf__max_features": "sqrt",
+    "clf__min_samples_leaf": "5",
+    "clf__n_estimators": "600"
+  },
+  "rf_cv_macro_f1": 0.7747793286434772,
+  "covid_split": {
+    "pre-lockdown": {
+      "n": 3018,
+      "persistence": {
+        "accuracy": 0.7004638833664678,
+        "macro_f1": 0.6950483384712366,
+        "weighted_f1": 0.7006617996357496
+      },
+      "random_forest": {
+        "accuracy": 0.7150430748840292,
+        "macro_f1": 0.7096754307231415,
+        "weighted_f1": 0.7173107483423388
+      }
+    },
+    "lockdown": {
+      "n": 1464,
+      "persistence": {
+        "accuracy": 0.8114754098360656,
+        "macro_f1": 0.633787697722178,
+        "weighted_f1": 0.8129700265746593
+      },
+      "random_forest": {
+        "accuracy": 0.8265027322404371,
+        "macro_f1": 0.6568155457542033,
+        "weighted_f1": 0.8277612097208674
+      }
+    }
+  },
+  "permutation_importance": [
+    {
+      "feature": "hrs_mean_3",
+      "importance": 0.019848932761717997,
+      "std": 0.0027972193886801316
+    },
+    {
+      "feature": "hrs_mean_7",
+      "importance": 0.01120128715647808,
+      "std": 0.002215345317418642
+    },
+    {
+      "feature": "hrs_mean_14",
+      "importance": 0.0102611968025075,
+      "std": 0.001645830067608286
+    },
+    {
+      "feature": "hrs_mean_30",
+      "importance": 0.005480173737292681,
+      "std": 0.002197686418439265
+    },
+    {
+      "feature": "hrs_lag_1",
+      "importance": 0.0025841902856701847,
+      "std": 0.001849476970092241
+    },
+    {
+      "feature": "month_cos",
+      "importance": 0.0016005879108495157,
+      "std": 0.0009285150812968339
+    },
+    {
+      "feature": "is_winter",
+      "importance": 0.000688607429427357,
+      "std": 0.0006352307992934271
+    },
+    {
+      "feature": "hrs_std_7",
+      "importance": 9.358979889391161e-05,
+      "std": 0.0002519038483251095
+    },
+    {
+      "feature": "weight_coverage",
+      "importance": 8.84639861948644e-05,
+      "std": 0.00022057821907363036
+    },
+    {
+      "feature": "dow_cos",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "dow_sin",
+      "importance": 0.0,
+      "std": 0.0
+    },
+    {
+      "feature": "voc_observed",
+      "importance": -4.7221014306830786e-05,
+      "std": 0.0001767911115739487
+    },
+    {
+      "feature": "voc_index",
+      "importance": -0.00011720968540009923,
+      "std": 0.00032392411519076644
+    },
+    {
+      "feature": "month_sin",
+      "importance": -0.00024116088321088914,
+      "std": 0.0004737654297741553
+    },
+    {
+      "feature": "hrs_std_14",
+      "importance": -0.0004498376358747391,
+      "std": 0.0008570874069812799
+    },
+    {
+      "feature": "hrs_lag_7",
+      "importance": -0.0005700931379485574,
+      "std": 0.0005509798263365716
+    },
+    {
+      "feature": "hrs_trend",
+      "importance": -0.0008534938951270776,
+      "std": 0.0001956652974934279
+    }
+  ]
+}
