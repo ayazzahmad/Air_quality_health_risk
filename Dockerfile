@@ -20,8 +20,9 @@ COPY data/       data/
 COPY pipeline/   pipeline/
 COPY train.py    .
 
-# Train the model → produces artifacts/model.joblib
-RUN python train.py --data data/city_day.csv --out artifacts/model.joblib
+# Train the model (fast mode uses best-known hyperparameters, skips grid-search)
+# Remove --fast to run the full grid-search (~10 min extra build time)
+RUN python train.py --data data/city_day.csv --out artifacts/model.joblib --fast
 
 
 # ─────────────────────────────────────────────────────────────────────────────

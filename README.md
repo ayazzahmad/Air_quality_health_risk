@@ -200,10 +200,131 @@ pipeline/
   data.py             loading, cleaning, data-quality gates
   features.py         composite score, causal features, forward label
   models.py           baselines, models, tuning, evaluation
+train.py              CLI training script — saves artifacts/model.joblib
+app/
+  main.py             FastAPI service (predict, batch-predict, health)
+tests/
+  test_api.py         pytest suite for all API endpoints
 verify_no_leakage.py  executable checks on the core invariants
 data/city_day.csv     source data (~2.5 MB), so the project runs as cloned
 results/              generated outputs (model.joblib is gitignored)
 ```
+
+## FastAPI service
+
+The trained model is served via a FastAPI application.
+
+### 1 — Train the model
+
+```bash
+pip install -r requirements.txt
+
+# Full grid-search (~5–10 min, reproduces the README results exactly)
+python train.py
+
+# Fast mode — skips grid-search, uses best-known hyperparameters (~30 s)
+python train.py --fast
+```
+
+Both commands write `artifacts/model.joblib`.
+
+### 2 — Start the server
+
+```bash
+pip install -r requirements-api.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Swagger UI → <http://localhost:8000/docs>
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET`  | `/` | Service ping |
+| `GET`  | `/health` | Model status, features, risk thresholds, test metrics |
+| `POST` | `/predict` | Single city-day prediction |
+| `POST` | `/predict/batch` | Batch predictions (up to 500 readings) |
+| `GET`  | `/docs` | Swagger UI |
+| `GET`  | `/redoc` | ReDoc UI |
+
+### Example request
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "date": "2020-01-15",
+    "city": "Delhi",
+    "PM2.5": 98.4,
+    "PM10": 152.0,
+    "NO2": 43.1,
+    "SO2": 11.2,
+    "CO": 1.8,
+    "O3": 29.5,
+    "Benzene": 2.1,
+    "Toluene": 4.3,
+    "Xylene": 1.0
+  }'
+```
+
+```json
+{
+  "city": "Delhi",
+  "date": "2020-01-15",
+  "risk_level": "High",
+  "probabilities": {"High": 0.73, "Low": 0.05, "Moderate": 0.22},
+  "daily_hrs": 0.412
+}
+```
+
+All pollutant fields are **optional** — missing values are imputed with
+training-set medians by the model's internal `SimpleImputer`.
+
+### Run the tests
+
+```bash
+pip install pytest httpx
+pytest tests/ -v
+```
+
+## Docker
+
+### Docker Compose (recommended)
+
+```bash
+# Builds the image (trains the model inside) and starts the API
+docker-compose up --build
+```
+
+The API is live at <http://localhost:8000>.
+
+### Manual Docker build
+
+```bash
+# Build — the trainer stage runs python train.py --fast automatically
+docker build -t air-quality-risk-api .
+
+# Run
+docker run -p 8000:8000 air-quality-risk-api
+```
+
+To use a locally-trained artifact without rebuilding:
+
+```bash
+docker run -p 8000:8000 \
+  -v "$(pwd)/artifacts:/app/artifacts:ro" \
+  -e MODEL_PATH=artifacts/model.joblib \
+  air-quality-risk-api
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MODEL_PATH` | `artifacts/model.joblib` | Path to the trained artifact |
+
+Copy `.env.example` to `.env` to override locally.
 
 The notebook is a thin narrative over `pipeline/`, rather than a self-contained
 script. Two reasons: the same code path is then covered by

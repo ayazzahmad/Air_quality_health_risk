@@ -6,6 +6,7 @@ venv/
 .env
 # Regenerated artifacts — not worth versioning the binary
 artifacts/
+!artifacts/README.md
 *.joblib
 # Notebook checkpoints
 notebooks/.ipynb_checkpoints/

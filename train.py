@@ -1,93 +1,130 @@
 """
-train.py – Train the RandomForest model and save artifacts/model.joblib.
+train.py – Train the tuned RandomForest model using the production pipeline
+and save a self-contained artifact to artifacts/model.joblib.
 
-Usage:
-    python train.py
-    python train.py --data data/city_day.csv --out artifacts/model.joblib
+Usage
+-----
+    python train.py                                    # defaults
+    python train.py --data data/city_day.csv \\
+                    --out  artifacts/model.joblib \\
+                    --fast                             # skip grid-search, use best params
 """
 import argparse
-import os
 import pathlib
 
 import joblib
+import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report
 
-from pipeline.preprocess import (
+from pipeline import config as cfg
+from pipeline.data import build_clean_frame
+from pipeline.features import (
     FEATURE_COLUMNS,
-    POLLUTANTS,
-    add_temporal_features,
+    add_causal_features,
+    add_forward_target,
+    apply_composite_score,
     apply_risk_labels,
-    build_exposure_features,
-    load_and_clean,
+    fit_pollutant_ranker,
+    fit_risk_thresholds,
 )
-from sklearn.preprocessing import MinMaxScaler
+from pipeline.models import full_report, tune_random_forest
 
 
-def main(data_path: str, out_path: str) -> None:
-    # ── 1. Load & clean ──────────────────────────────────────────────────────
+def main(data_path: str, out_path: str, fast: bool = False) -> None:
+    # ── 1. Load & clean (causal imputation, quality gates) ───────────────────
     print(f"[train] Loading {data_path}")
-    df = load_and_clean(data_path)
-    df = add_temporal_features(df)
+    df, audit = build_clean_frame()
+    print(f"[train] Cities retained : {len(audit['cities_retained'])}")
+    print(f"[train] Rows retained   : {audit['rows_retained']}")
 
-    # ── 2. Temporal split (80 / 20 chronological) ────────────────────────────
-    cutoff = df["Date"].sort_values().iloc[int(len(df) * 0.8)]
-    train_mask = df["Date"] < cutoff
-    print(f"[train] Cutoff date: {cutoff.date()}  train={train_mask.sum()}  test={(~train_mask).sum()}")
+    # ── 2. Temporal split ─────────────────────────────────────────────────────
+    test_start  = pd.Timestamp(cfg.TEST_START)
+    train_cut   = test_start - pd.Timedelta(days=cfg.EMBARGO_DAYS)
 
-    # ── 3. Fit scaler on training rows only ──────────────────────────────────
-    scaler = MinMaxScaler()
-    scaler.fit(df.loc[train_mask, POLLUTANTS])
+    # ── 3. Fit pollutant ranker (QuantileTransformer) on TRAIN only ───────────
+    ranker = fit_pollutant_ranker(df[df["Date"] < train_cut])
 
-    # ── 4. Build exposure features ───────────────────────────────────────────
-    df = build_exposure_features(df, scaler)
-    df = df.dropna(subset=["HRS_7day"]).reset_index(drop=True)
+    # ── 4. Build composite score + causal features + forward label ────────────
+    df = apply_composite_score(df, ranker)
+    df = add_causal_features(df)
+    df = add_forward_target(df)
 
-    # Recompute masks after dropna
-    cutoff = df["Date"].sort_values().iloc[int(len(df) * 0.8)]
-    train_mask = df["Date"] < cutoff
+    # ── 5. Split ──────────────────────────────────────────────────────────────
+    # Drop rows that have any required feature or the label missing
+    required = [c for c in FEATURE_COLUMNS if c != "voc_index"]
+    ok       = df.dropna(subset=required + ["target_exposure"])
+    train    = ok[ok["Date"] <  train_cut]
+    test     = ok[ok["Date"] >= test_start]
+    print(f"[train] Train rows: {len(train)}  |  Test rows: {len(test)}")
 
-    # ── 5. Risk thresholds fitted on training set ────────────────────────────
-    low_th, high_th = df.loc[train_mask, "HRS_7day"].quantile([0.33, 0.66])
-    df["Health_Risk_Level"] = apply_risk_labels(df, low_th, high_th)
+    # ── 6. Risk thresholds from TRAIN only ────────────────────────────────────
+    lo, hi = fit_risk_thresholds(train["target_exposure"])
+    y_train = apply_risk_labels(train["target_exposure"], lo, hi)
+    y_test  = apply_risk_labels(test["target_exposure"],  lo, hi)
 
-    # ── 6. Impute missing feature values with training medians ────────────────
-    X = df[FEATURE_COLUMNS]
-    y = df["Health_Risk_Level"]
-    train_medians = X.loc[train_mask].median()
-    X = X.fillna(train_medians)
+    # ── 7. Train (grid-search or best known params) ───────────────────────────
+    if fast:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+        print("[train] Fast mode — using best known params (no grid search)")
+        model = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("clf", RandomForestClassifier(
+                n_estimators=600, max_depth=4, min_samples_leaf=5,
+                max_features="sqrt", class_weight="balanced",
+                random_state=cfg.RANDOM_STATE, n_jobs=-1,
+            )),
+        ])
+        model.fit(train[FEATURE_COLUMNS], y_train)
+    else:
+        print("[train] Running grid-search (this takes a few minutes) …")
+        search = tune_random_forest(
+            train[FEATURE_COLUMNS], y_train, train["Date"]
+        )
+        model = search.best_estimator_
+        print(f"[train] Best params : {search.best_params_}")
+        print(f"[train] CV macro F1 : {search.best_score_:.4f}")
 
-    X_train, y_train = X[train_mask], y[train_mask]
-    X_test,  y_test  = X[~train_mask], y[~train_mask]
+    # ── 8. Evaluate ───────────────────────────────────────────────────────────
+    report = full_report(
+        "RandomForest", model,
+        train[FEATURE_COLUMNS], y_train,
+        test[FEATURE_COLUMNS],  y_test,
+    )
+    print(f"[train] Test accuracy : {report['test']['accuracy']:.4f}")
+    print(f"[train] Test macro F1 : {report['test']['macro_f1']:.4f}")
 
-    # ── 7. Train ─────────────────────────────────────────────────────────────
-    print("[train] Fitting RandomForestClassifier …")
-    rf = RandomForestClassifier(n_estimators=200, max_depth=50, random_state=42)
-    rf.fit(X_train, y_train)
-
-    print("\n[train] Test classification report:")
-    print(classification_report(y_test, rf.predict(X_test)))
-
-    # ── 8. Save artifacts ────────────────────────────────────────────────────
+    # ── 9. Save artifact ──────────────────────────────────────────────────────
     pathlib.Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     artifact = {
-        "model":        rf,
-        "scaler":       scaler,
-        "features":     FEATURE_COLUMNS,
-        "classes":      list(rf.classes_),
-        "low_th":       float(low_th),
-        "high_th":      float(high_th),
-        "train_medians": train_medians.to_dict(),
+        "model":         model,
+        "ranker":        ranker,
+        "features":      FEATURE_COLUMNS,
+        "classes":       cfg.RISK_LABELS,
+        "low_th":        lo,
+        "high_th":       hi,
+        "test_metrics":  report["test"],
     }
     joblib.dump(artifact, out_path)
     print(f"[train] Saved → {out_path}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--data", default="data/city_day.csv")
-    parser.add_argument("--out",  default="artifacts/model.joblib")
+    parser = argparse.ArgumentParser(
+        description="Train the Air Quality Health Risk forecasting model."
+    )
+    parser.add_argument(
+        "--data", default=str(cfg.DATA_PATH),
+        help="Path to city_day.csv (default: data/city_day.csv)"
+    )
+    parser.add_argument(
+        "--out", default="artifacts/model.joblib",
+        help="Output path for the saved artifact"
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Skip grid-search, use best-known hyperparameters"
+    )
     args = parser.parse_args()
-    main(args.data, args.out)
-
+    main(args.data, args.out, args.fast)
