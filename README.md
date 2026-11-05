@@ -2,6 +2,11 @@
 
 [![CI](https://github.com/ayazzahmad/Air_quality_health_risk/actions/workflows/ci.yml/badge.svg)](https://github.com/ayazzahmad/Air_quality_health_risk/actions/workflows/ci.yml)
 
+**Live API:** <https://air-quality-risk-api.onrender.com/docs>. The interactive
+Swagger UI lets you try every endpoint in the browser. It runs on Render's free
+plan, so the first request after a quiet spell can take up to a minute while the
+service wakes up.
+
 Forecasting next-week air-pollution health risk (**Low / Moderate / High**) for
 18 Indian cities from daily multi-pollutant measurements and weather
 (2015–2020). The models are served through a **FastAPI** service and packaged
@@ -436,7 +441,8 @@ health-checked on `/health`, deploying from `main`.
    `render.yaml`, so there's nothing else to fill in.
 3. Click **Deploy Blueprint**. The first build trains the model inside the
    image and takes a few minutes.
-4. Open `https://<service-name>.onrender.com/docs`.
+4. Open `https://<service-name>.onrender.com/docs`. This project's instance
+   is <https://air-quality-risk-api.onrender.com/docs>.
 
 Later pushes to `main` redeploy automatically, but **only after CI passes**
 (`autoDeployTrigger: checksPass`).
