@@ -1,5 +1,7 @@
 # Exposure-Aware Air Quality Health Risk Forecasting
 
+[![CI](https://github.com/ayazzahmad/Air_quality_health_risk/actions/workflows/ci.yml/badge.svg)](https://github.com/ayazzahmad/Air_quality_health_risk/actions/workflows/ci.yml)
+
 Forecasting next-week air-pollution health risk (**Low / Moderate / High**) for
 18 Indian cities from daily multi-pollutant measurements and weather
 (2015–2020). The models are served through a **FastAPI** service and packaged
@@ -417,10 +419,30 @@ docker run -p 8000:8000 -v "$(pwd)/artifacts:/app/artifacts:ro" air-quality-risk
 | Variable | Default | Description |
 |---|---|---|
 | `MODEL_PATH` | `artifacts/model.joblib` | Path to the trained artifact inside the container |
+| `PORT` | `8000` | Port the server listens on inside the container (hosting platforms set this) |
 | `API_PORT` | `8000` | Host port published by `docker compose` |
 
 Copy [`.env.example`](.env.example) to `.env` to override these values. Compose
 reads it automatically.
+
+### Deploying to Render
+
+[`render.yaml`](render.yaml) is a Render Blueprint that describes the whole
+service: a free Docker web service in Singapore, built from the `Dockerfile`,
+health-checked on `/health`, deploying from `main`.
+
+1. Sign in at [render.com](https://render.com) with GitHub.
+2. Go to **New → Blueprint** and pick this repository. Render reads
+   `render.yaml`, so there's nothing else to fill in.
+3. Click **Deploy Blueprint**. The first build trains the model inside the
+   image and takes a few minutes.
+4. Open `https://<service-name>.onrender.com/docs`.
+
+Later pushes to `main` redeploy automatically, but **only after CI passes**
+(`autoDeployTrigger: checksPass`).
+
+Free instances sleep after about 15 minutes without traffic, so the first
+request after a pause can take up to a minute while the service wakes up.
 
 ## Testing and verification
 
@@ -495,6 +517,7 @@ leak rather than passing by default.
 ├── ruff.toml                   lint configuration
 ├── Dockerfile                  two stages: train, then serve
 ├── docker-compose.yml
+├── render.yaml                 Render Blueprint for the public deployment
 ├── requirements.txt            training and notebook
 ├── requirements-api.txt        serving
 ├── requirements-dev.txt        everything, plus pytest and Jupyter
