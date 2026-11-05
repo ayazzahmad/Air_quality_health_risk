@@ -9,10 +9,13 @@ Run with:
 The tests use a lightweight mock artifact so they do NOT require a trained
 model on disk — they are safe to run in CI before `python train.py`.
 """
-import types
+import datetime as dt
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+
+import app.main as main_mod
 
 
 # ---------------------------------------------------------------------------
@@ -20,22 +23,25 @@ from fastapi.testclient import TestClient
 # ---------------------------------------------------------------------------
 
 class _MockPipeline:
-    classes_ = ["High", "Low", "Moderate"]
+    classes_ = np.array(["High", "Low", "Moderate"])
+
+    def __init__(self):
+        self.last_X = None
 
     def predict(self, X):
-        return np.array(["Low"])
+        self.last_X = X
+        return np.full(len(X), "Low", dtype=object)
 
     def predict_proba(self, X):
-        return np.array([[0.15, 0.70, 0.15]])
+        return np.tile([0.15, 0.70, 0.15], (len(X), 1))
 
 
 class _MockRanker:
+    """Ranks every observed value at 0.5 and keeps NaN, like QuantileTransformer."""
+
     def transform(self, df):
-        import pandas as pd
-        return pd.DataFrame(
-            np.full((len(df), len(df.columns)), 0.5),
-            columns=df.columns,
-        )
+        values = df.to_numpy(dtype=float)
+        return np.where(np.isnan(values), np.nan, 0.5)
 
 
 _MOCK_FEATURES = [
@@ -64,19 +70,17 @@ _MOCK_ARTIFACT = {
 
 @pytest.fixture(scope="module")
 def client():
-    import app.main as main_mod
-
-    # Inject mock artifact fields directly
-    main_mod._model        = _MOCK_ARTIFACT["model"]
-    main_mod._ranker       = _MOCK_ARTIFACT["ranker"]
-    main_mod._features     = _MOCK_ARTIFACT["features"]
-    main_mod._classes      = _MOCK_ARTIFACT["classes"]
-    main_mod._low_th       = _MOCK_ARTIFACT["low_th"]
-    main_mod._high_th      = _MOCK_ARTIFACT["high_th"]
-    main_mod._test_metrics = _MOCK_ARTIFACT["test_metrics"]
-    main_mod._model_loaded = True
-
-    return TestClient(main_mod.app)
+    # Inject mock artifact fields directly; restored after the module's tests
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(main_mod, "_model",        _MOCK_ARTIFACT["model"], raising=False)
+        mp.setattr(main_mod, "_ranker",       _MOCK_ARTIFACT["ranker"], raising=False)
+        mp.setattr(main_mod, "_features",     _MOCK_ARTIFACT["features"], raising=False)
+        mp.setattr(main_mod, "_classes",      _MOCK_ARTIFACT["classes"], raising=False)
+        mp.setattr(main_mod, "_low_th",       _MOCK_ARTIFACT["low_th"], raising=False)
+        mp.setattr(main_mod, "_high_th",      _MOCK_ARTIFACT["high_th"], raising=False)
+        mp.setattr(main_mod, "_test_metrics", _MOCK_ARTIFACT["test_metrics"], raising=False)
+        mp.setattr(main_mod, "_model_loaded", True)
+        yield TestClient(main_mod.app)
 
 
 # ---------------------------------------------------------------------------
@@ -212,3 +216,82 @@ class TestPredictBatch:
     def test_empty_readings_422(self, client):
         r = client.post("/predict/batch", json={"readings": []})
         assert r.status_code == 422
+
+
+class TestValidation:
+    _BASE = {"date": "2020-01-15", "city": "Delhi", "PM2.5": 98.4}
+
+    def test_invalid_date_422(self, client):
+        r = client.post("/predict", json={**self._BASE, "date": "not-a-date"})
+        assert r.status_code == 422
+
+    def test_negative_concentration_422(self, client):
+        r = client.post("/predict", json={**self._BASE, "PM2.5": -5})
+        assert r.status_code == 422
+
+    def test_field_name_accepted_as_well_as_alias(self, client):
+        r = client.post("/predict", json={"date": "2020-01-15", "city": "Delhi",
+                                          "PM2_5": 98.4, "PM10": 150, "NO2": 40})
+        assert r.status_code == 200
+        assert r.json()["daily_hrs"] == pytest.approx(0.5)
+
+    def test_low_coverage_has_no_daily_hrs(self, client):
+        # PM2.5 alone is 35% of the composite weight, below the 60% gate
+        body = client.post("/predict", json=self._BASE).json()
+        assert body["daily_hrs"] is None
+
+    def test_duplicate_city_date_in_batch_422(self, client):
+        r = client.post("/predict/batch", json={"readings": [self._BASE, self._BASE]})
+        assert r.status_code == 422
+
+
+class TestHistoryFeatures:
+    """Batch readings of one city feed the rolling features, causally."""
+
+    @staticmethod
+    def _series(n_days, city="Delhi", start=dt.date(2020, 1, 1)):
+        return [
+            {"date": str(start + dt.timedelta(days=i)), "city": city,
+             "PM2.5": 90, "PM10": 150, "NO2": 40, "SO2": 10, "CO": 1.5, "O3": 30}
+            for i in range(n_days)
+        ]
+
+    def test_full_history_fills_rolling_features(self, client):
+        body = client.post("/predict/batch", json={"readings": self._series(31)}).json()
+        assert [r["history_days"] for r in body["results"]][:3] == [0, 1, 2]
+        assert body["results"][-1]["history_days"] == 30
+
+        X = main_mod._model.last_X
+        assert X.iloc[-1][["hrs_mean_30", "hrs_lag_7", "hrs_std_14"]].notna().all()
+        assert X.iloc[0][["hrs_mean_3", "hrs_lag_1"]].isna().all()
+
+    def test_results_keep_request_order(self, client):
+        readings = self._series(5)[::-1] + self._series(2, city="Patna")
+        body = client.post("/predict/batch", json={"readings": readings}).json()
+        assert [(r["city"], r["date"]) for r in body["results"]] == [
+            (r["city"], r["date"]) for r in readings
+        ]
+
+    def test_cities_do_not_share_history(self, client):
+        readings = self._series(10) + self._series(1, city="Patna",
+                                                   start=dt.date(2020, 1, 10))
+        body = client.post("/predict/batch", json={"readings": readings}).json()
+        assert body["results"][-1]["history_days"] == 0
+
+    def test_supplied_lag_used_only_without_history(self, client):
+        client.post("/predict", json={**self._series(1)[0], "HRS_lag1": 0.9})
+        assert main_mod._model.last_X.iloc[0]["hrs_lag_1"] == pytest.approx(0.9)
+
+        readings = self._series(2)
+        readings[1]["HRS_lag1"] = 0.9
+        client.post("/predict/batch", json={"readings": readings})
+        assert main_mod._model.last_X.iloc[1]["hrs_lag_1"] == pytest.approx(0.5)
+
+
+def test_503_when_model_missing(monkeypatch):
+    monkeypatch.setattr(main_mod, "_model_loaded", False)
+    monkeypatch.setattr(main_mod, "_load_error", "no artifact")
+    c = TestClient(main_mod.app)
+    assert c.get("/").status_code == 200
+    assert c.get("/health").status_code == 503
+    assert c.post("/predict", json={"date": "2020-01-15", "city": "Delhi"}).status_code == 503

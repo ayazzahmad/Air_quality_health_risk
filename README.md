@@ -1,51 +1,127 @@
 # Exposure-Aware Air Quality Health Risk Forecasting
 
 Forecasting next-week air-pollution health risk (**Low / Moderate / High**) for
-18 Indian cities from multi-pollutant daily measurements, 2015–2020.
+18 Indian cities from daily multi-pollutant measurements (2015–2020). The model
+is served through a **FastAPI** service and packaged with **Docker**.
 
-This is a corrected rebuild of an earlier version of this project. The earlier
-version reported **89% accuracy**; that number was an artifact of building the
-label out of the same rolling window the features were computed from. Rebuilt as
-a genuine forecasting task, the honest number is **75.1% accuracy / 0.756 macro
-F1** — and only **+0.018 macro F1 above a trivial persistence rule**. Full
-defect-by-defect accounting in [FIXES.md](FIXES.md).
+> **Headline:** 75.1% accuracy / **0.756 macro F1** on a held-out future
+> period. That is **+0.018 macro F1 over a one-line persistence rule**
+> ("next week looks like this week"). Reporting it against that baseline is
+> deliberate. An earlier version of this project reported 89% accuracy, and
+> that figure came from target leakage. This repository is the corrected
+> rebuild. Every defect and its fix is listed in [FIXES.md](FIXES.md).
 
-## The task
+---
 
-At day *t*, using only data from day *t* and earlier, predict the risk level of
-mean pollution exposure over days **t+1 … t+7**.
+## Contents
 
-Feature windows end at *t*. The label window starts at *t+1*. They never
-overlap — this is the correction that matters most, because the original label
-(a 7-day mean) was being predicted from its own 3-day and 1-day components.
+- [The problem](#the-problem)
+- [How it works](#how-it-works)
+- [Results](#results)
+- [Quick start](#quick-start)
+- [REST API](#rest-api)
+- [Docker](#docker)
+- [Testing and verification](#testing-and-verification)
+- [Project structure](#project-structure)
+- [Limitations](#limitations)
+- [Why this rebuild exists](#why-this-rebuild-exists)
+
+---
+
+## The problem
+
+Air quality in Indian cities swings sharply with season, traffic and weather.
+A forecast of the **coming week's** pollution exposure can help people and
+local agencies plan ahead. The model answers one question:
+
+> At day *t*, using only data from day *t* and earlier, what will the risk
+> level of mean pollution exposure be over days **t+1 … t+7**?
+
+The feature windows end at *t* and the label window starts at *t+1*, so they
+never overlap. The original version broke this rule: its label was a 7-day
+mean that it "predicted" from that same window's own 3-day and 1-day parts.
+
+**Data:** [`data/city_day.csv`](data/city_day.csv) contains daily
+concentrations of PM2.5, PM10, NO₂, SO₂, CO, O₃ and the VOCs benzene, toluene
+and xylene, for 26 Indian cities from 2015 to 2020. It ships with the repo, so
+the project runs as soon as it is cloned.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[city_day.csv] --> B[Clean and gate<br/>pipeline/data.py]
+    B --> C[Composite exposure score<br/>percentile-ranked pollutants]
+    C --> D[Causal features<br/>rolling means, lags, volatility,<br/>calendar, VOC, coverage]
+    C --> E[Forward label<br/>mean exposure t+1..t+7]
+    D --> F[Random forest<br/>tuned with TimeSeriesSplit]
+    E --> F
+    F --> G[artifacts/model.joblib]
+    G --> H[FastAPI service]
+```
+
+**1. Data quality.** Negative concentrations are masked. Gaps are
+forward-filled within each city for up to 3 days, using past values only.
+Cities with less than a year of history are dropped. Rows where less than 60%
+of the pollutant weight was measured are kept but marked unscoreable, which
+keeps each city's calendar contiguous so rolling windows mean what they say.
+**Mumbai** (39% scoreable) and **Ahmedabad** (70%) are excluded for poor
+coverage. Aizawl, Bhopal, Chandigarh, Ernakulam, Kochi and Shillong are
+excluded for short history. **18 cities and 24,173 rows remain.**
+
+**2. Composite exposure score.** This is a weighted sum of six pollutants
+(PM2.5 0.35, PM10 0.20, NO₂ 0.15, SO₂/CO/O₃ 0.10 each), applied to
+**percentile-ranked** values. Ranking matters because the tails are extreme:
+CO reaches 175 against a 75th percentile of 1.5. Min-max scaling would squash
+ordinary days towards zero and quietly break the weighting. The ranker is
+fitted on training rows only. On each day, the weights are renormalised over
+the pollutants actually measured, so no value is invented.
+
+**3. Features.** Every feature ends at day *t* and needs a complete window:
+
+| Group | Features |
+|---|---|
+| Level | 3/7/14/30-day rolling means of the score |
+| Volatility | 7/14-day rolling std. dev. of the raw daily score |
+| Momentum | lags of 1 and 7 days; 7-vs-14-day trend |
+| Calendar | cyclical month and day-of-week (sin/cos); winter flag |
+| Data quality | VOC index plus an explicit "VOC observed" flag; per-row pollutant coverage |
+
+**4. Label.** The label is the mean exposure over the next 7 days, binned into
+terciles. The cut points are fitted on **training data only**:
+Low ≤ 0.403 < Moderate ≤ 0.593 < High.
+
+**5. Split and tuning.** The split is a global date cutoff at **2019-10-01**,
+with a 7-day embargo before it so that no training label uses a test-period
+day. Every city appears on both sides of the cutoff. A random forest is tuned
+by grid search with forward-chaining `TimeSeriesSplit` on macro F1.
 
 ## Results
 
-Test period: 2019-10-01 → 2020-07-01 (4,482 days-city observations, never seen
-during training or tuning).
+The test period runs from **2019-10-01 to 2020-07-01** (4,482 city-days). It
+was never seen during training or tuning.
 
-| | accuracy | macro F1 |
+| Model | Accuracy | Macro F1 |
 |---|---|---|
 | Majority class | 0.272 | 0.142 |
 | **Persistence** ("next week = this week") | **0.737** | **0.737** |
 | Logistic regression | 0.748 | 0.750 |
 | **Random forest** (tuned) | **0.751** | **0.756** |
 
-**The honest headline: the tuned model beats persistence by 1.8 macro-F1
-points** (0.7556 vs 0.7373). Pollution exposure is strongly autocorrelated, so most of what looks
-like predictive skill is just inertia. Any evaluation of this problem that omits
-the persistence baseline will overstate the model's contribution — which is
-exactly what happened in the original.
+Pollution exposure is strongly autocorrelated, so most of what looks like
+skill is really inertia. Any evaluation of this problem that leaves out the
+persistence baseline will overstate what the model adds.
 
-Random forest, per class:
+<details>
+<summary><b>Per-class performance and confusion matrix</b></summary>
 
-| class | precision | recall | F1 | n |
+| Class | Precision | Recall | F1 | n |
 |---|---|---|---|---|
 | Low | 0.829 | 0.772 | 0.800 | 1,744 |
 | Moderate | 0.625 | 0.702 | 0.661 | 1,521 |
 | High | 0.828 | 0.785 | 0.806 | 1,217 |
 
-Confusion matrix (rows actual, columns predicted):
+Rows are actual classes, columns are predicted:
 
 | | Low | Moderate | High |
 |---|---|---|---|
@@ -53,39 +129,33 @@ Confusion matrix (rows actual, columns predicted):
 | **Moderate** | 268 | 1067 | 186 |
 | **High** | 9 | 253 | 955 |
 
-Errors are almost entirely between adjacent classes: only 12 Low days are called
-High and 9 High days are called Low, out of 4,482. Moderate is the weak class
-(F1 0.661) because it is bounded on both sides — the same structural pattern as
-the "CANDIDATE" class in my [Kepler KOI
-project](https://github.com/ayazzahmad/kepler-koi-classification), and for the
-same reason: a middle band defined by thresholds is intrinsically fuzzier than
-the extremes.
+Nearly all errors are between adjacent classes: only 12 Low days are called
+High, and only 9 High days are called Low. Moderate is the weakest class
+because it is bounded on both sides. The middle band of a thresholded scale is
+inherently fuzzier than its extremes.
 
-Tuning selected `max_depth=4, min_samples_leaf=5, n_estimators=600` (CV macro F1
-0.775) against a train macro F1 of 0.800 and test 0.756 — a modest, visible
-generalisation gap. The original used `max_depth=50` with no search and never
-reported a training score, so it had no way to see overfitting at all.
+</details>
 
-### Distribution shift is real and reported
+**Generalisation.** The search selected `max_depth=4, min_samples_leaf=5,
+n_estimators=600`. Cross-validated macro F1 was 0.775, train 0.800 and test
+0.756, which is a modest and visible gap.
 
-India's COVID-19 lockdown (2020-03-25) falls inside the test window and changed
-air quality sharply, so metrics are reported on both sides of it:
+**Distribution shift.** India's COVID-19 lockdown (from 2020-03-25) falls
+inside the test window, so results are reported on both sides of it:
 
-| segment | n | persistence macro F1 | RF macro F1 |
+| Segment | n | Persistence macro F1 | RF macro F1 |
 |---|---|---|---|
-| pre-lockdown | 3,018 | 0.695 | 0.710 |
-| lockdown | 1,464 | 0.634 | 0.657 |
+| Pre-lockdown | 3,018 | 0.695 | 0.710 |
+| Lockdown | 1,464 | 0.634 | 0.657 |
 
-Both degrade under the regime change, as expected. The model's margin over
-persistence widens slightly during lockdown (+0.023 vs +0.015) — when yesterday
-stops being a good guide to tomorrow, the extra features earn a little more of
-their keep.
+The model's margin over persistence widens slightly during the lockdown (+0.023
+against +0.015). When yesterday stops being a good guide to tomorrow, the extra
+features earn more of their keep.
 
-### What actually drives predictions
+**What drives predictions.** These are permutation importances on held-out
+data:
 
-Permutation importance on held-out test data (drop in macro F1 when shuffled):
-
-| feature | importance |
+| Feature | Importance (drop in macro F1) |
 |---|---|
 | `hrs_mean_3` | +0.0198 |
 | `hrs_mean_7` | +0.0112 |
@@ -93,296 +163,264 @@ Permutation importance on held-out test data (drop in macro F1 when shuffled):
 | `hrs_mean_30` | +0.0055 |
 | `hrs_lag_1` | +0.0026 |
 | `month_cos` | +0.0016 |
-| `hrs_std_7` | +0.0001 |
-| `dow_sin` / `dow_cos` | ~0 |
+| `hrs_std_7` / `hrs_std_14` | +0.0001 / −0.0004 |
+| `dow_sin` / `dow_cos` | ≈ 0 |
 
-Two corrections to claims made in the original write-up:
+Recent exposure levels dominate. Volatility carries essentially no signal, and
+there is no day-of-week effect. Both findings contradict claims made in the
+original write-up.
 
-- **Volatility carries essentially no signal** (`hrs_std_7` +0.0001,
-  `hrs_std_14` **−0.0004** — shuffling it slightly *helps*, i.e. it is noise).
-  The original claimed "volatility provides secondary but
-  meaningful signal" — that claim does not survive removing the leakage. It also
-  could not have been assessed properly there, because that feature was computed
-  on a series which had been accidentally overwritten by its own rolling mean.
-- **No day-of-week effect.** Both cyclical day-of-week terms sit at zero.
+The figures are in [`results/`](results/), and the full narrative is in
+[`notebooks/air_quality_health_risk_analysis.ipynb`](notebooks/air_quality_health_risk_analysis.ipynb).
+The notebook is committed with its outputs, so it can be read without running
+it.
 
-All importances are small in absolute terms, which is consistent with the
-narrow margin over persistence: the rolling means carry largely redundant
-information, so removing any single one costs little.
+## Quick start
 
-## Method
-
-**Composite exposure score.** Weighted sum of six pollutants (PM2.5 0.35, PM10
-0.20, NO₂ 0.15, SO₂/CO/O₃ 0.10 each), applied to **percentile-ranked** values.
-Ranking rather than min-max scaling matters here: CO reaches 175 against a 75th
-percentile of 1.5, and PM10 reaches 1000 against 130. Under min-max, ordinary
-days compress into a sliver near zero and a pollutant's nominal weight stops
-matching its real contribution — the weighting scheme becomes decorative. The
-ranker is fitted on training rows only.
-
-Weights are renormalised over the pollutants actually **observed** on each row,
-so no pollutant value is ever invented.
-
-**Features** (all ending at day *t*, all requiring complete windows):
-rolling means over 3/7/14/30 days; rolling standard deviations over 7/14 days
-computed on the *raw* daily score; lags at 1 and 7 days; a 7-vs-14-day trend
-term; cyclical month and day-of-week encodings; a winter indicator; VOC index
-with an explicit observed/not-observed flag; and per-row pollutant coverage as a
-data-quality signal.
-
-**Split.** Global date cutoff at 2019-10-01, with a 7-day embargo before it so
-no training label is built from a test-period day. Every retained city has
-history on both sides of the cutoff. Hyperparameters tuned with forward-chaining
-`TimeSeriesSplit` on macro F1.
-
-**Data quality.** Negative concentrations masked; causal forward-fill within
-city (limit 3 days, uses only past values); cities with under 365 days of
-history dropped; rows with under 60% of pollutant weight observed flagged
-unscoreable but **retained**, so each city's daily contiguity survives and
-incomplete rolling windows stay incomplete.
-
-Two cities are excluded for coverage: **Mumbai** (39% of rows scoreable — around
-60% missing across most pollutants) and **Ahmedabad** (70%). Six more are
-excluded for insufficient history (Aizawl, Bhopal, Chandigarh, Ernakulam, Kochi,
-Shillong). 18 cities and 24,173 rows remain; 19,955 have complete feature
-history and a label.
-
-This dataset has severe, uneven missingness that the original glossed over with
-city-median imputation — Lucknow's PM10 and Ernakulam's O₃ are **100% missing**,
-Patna's PM10 is 90%, Chennai's 85%. Median-filling a column that is 85–100%
-absent produces a constant masquerading as a measurement.
-
-## Limitations
-
-Methodological limits that remain, stated plainly:
-
-- **The margin over persistence is small** (+0.018 macro F1). This model is a
-  modest improvement on inertia, not a strong forecaster.
-- **Labels are relative, not clinical.** Risk levels are training-set exposure
-  terciles, not medical or regulatory thresholds. There is no health-outcome
-  data anywhere in this dataset, so "health risk" is a proxy throughout.
-- **Pollutant weights are hand-assigned**, not learned or validated against
-  health outcomes. A learned weighting would need outcome data this dataset
-  lacks.
-- **No meteorology.** Wind, temperature, humidity and rainfall drive pollutant
-  dispersion and are absent.
-- **One pooled model across 18 cities**, which differ in baseline pollution,
-  measurement quality and seasonality. Per-city or hierarchical models are not
-  explored, and the pooled model is likely dominated by the long-history cities.
-- **The test window contains a structural break** (COVID-19), so headline test
-  metrics blend ordinary forecasting with regime change. Both are reported, but
-  a longer evaluation period would be better.
-- **Only two model families** (regularised linear, tree ensemble). Gradient
-  boosting and proper sequence models are untried.
-
-## Running it
+Requires **Python 3.12+** (developed and tested on 3.13).
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/ayazzahmad/Air_quality_health_risk.git
+cd Air_quality_health_risk
 
-# the analysis, start to finish
-jupyter notebook notebooks/air_quality_health_risk_analysis.ipynb
-
-# or just check the anti-leakage invariants
-python verify_no_leakage.py
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt   # training + API + tests + notebook
 ```
 
-The notebook runs top to bottom from a clean kernel in a few minutes (the grid
-search is the slow part) and is committed with its outputs, so it reads without
-being executed. Verified deterministic — rerunning reproduces every metric to
-four decimal places.
-
-```
-notebooks/
-  air_quality_health_risk_analysis.ipynb   the analysis, start to finish
-pipeline/
-  config.py           all tunable constants and split dates
-  data.py             loading, cleaning, data-quality gates
-  features.py         composite score, causal features, forward label
-  models.py           baselines, models, tuning, evaluation
-train.py              CLI training script — saves artifacts/model.joblib
-app/
-  main.py             FastAPI service (predict, batch-predict, health)
-tests/
-  test_api.py         pytest suite for all API endpoints
-verify_no_leakage.py  executable checks on the core invariants
-data/city_day.csv     source data (~2.5 MB), so the project runs as cloned
-results/              generated outputs (model.joblib is gitignored)
-```
-
-## FastAPI service
-
-The trained model is served via a FastAPI application.
-
-### 1 — Train the model
+**Train the model.** Both commands write `artifacts/model.joblib`.
 
 ```bash
-pip install -r requirements.txt
-
-# Full grid-search (~5–10 min, reproduces the README results exactly)
-python train.py
-
-# Fast mode — skips grid-search, uses best-known hyperparameters (~30 s)
-python train.py --fast
+python train.py --fast   # ~30 s: tuned hyperparameters, no grid search
+python train.py          # several minutes: reruns the full grid search
 ```
 
-Both commands write `artifacts/model.joblib`.
+Both produce the same model and the test metrics shown above.
+`--data <path>` and `--out <path>` override the input CSV and the output
+location.
 
-### 2 — Start the server
+**Serve it.**
 
 ```bash
-pip install -r requirements-api.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
-Swagger UI → <http://localhost:8000/docs>
+Open <http://localhost:8000/docs> for the interactive Swagger UI.
 
-### Endpoints
+**Explore the analysis.**
+
+```bash
+jupyter notebook notebooks/air_quality_health_risk_analysis.ipynb
+```
+
+The notebook runs top to bottom from a clean kernel in a few minutes. The grid
+search is the slow part.
+
+> **Dependency pins.** `numpy`, `pandas`, `scikit-learn` and `joblib` are
+> pinned to the same versions in `requirements.txt` and `requirements-api.txt`.
+> The model is saved as a pickle, so it must be loaded with the scikit-learn
+> version that trained it.
+
+## REST API
 
 | Method | Path | Description |
-|--------|------|-------------|
-| `GET`  | `/` | Service ping |
-| `GET`  | `/health` | Model status, features, risk thresholds, test metrics |
-| `POST` | `/predict` | Single city-day prediction |
-| `POST` | `/predict/batch` | Batch predictions (up to 500 readings) |
-| `GET`  | `/docs` | Swagger UI |
-| `GET`  | `/redoc` | ReDoc UI |
+|---|---|---|
+| `GET` | `/` | Service ping. Always 200, and reports whether the model is loaded |
+| `GET` | `/health` | Model status, features, class order, risk thresholds, test metrics. 503 if no model |
+| `POST` | `/predict` | Prediction for a single city-day |
+| `POST` | `/predict/batch` | Up to 500 readings; uses each city's earlier days as history |
+| `GET` | `/docs`, `/redoc` | Interactive documentation |
 
-### Example request
+### Request fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `date` | `YYYY-MM-DD` | Required. Invalid dates return 422 |
+| `city` | string | Required. Groups readings into a time series |
+| `PM2.5` (or `PM2_5`), `PM10`, `NO2`, `SO2`, `CO`, `O3` | number ≥ 0 | Optional. Core pollutants |
+| `Benzene`, `Toluene`, `Xylene` | number ≥ 0 | Optional. Summed into the VOC index |
+| `HRS_lag1`, `HRS_7day_std` | number | Optional fallbacks, used only when the request has no history to compute them |
+
+### History matters: `/predict` vs `/predict/batch`
+
+The model's strongest features are **rolling means over the past 3–30 days**.
+A single reading cannot supply them. In that case they are filled with
+training-set medians, so the prediction mostly reflects the season.
+
+`/predict/batch` groups readings by city, orders them by date, and builds each
+reading's features from **that day and the earlier readings of the same city**.
+It never uses later days, and it uses the same pipeline code as training. To
+get a real forecast, send the **preceding 30 days** of a city. Each result
+includes `history_days` (0–30), which shows how much context it had.
+
+The same Delhi winter day, with and without history:
 
 ```bash
 curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
-  -d '{
-    "date": "2020-01-15",
-    "city": "Delhi",
-    "PM2.5": 98.4,
-    "PM10": 152.0,
-    "NO2": 43.1,
-    "SO2": 11.2,
-    "CO": 1.8,
-    "O3": 29.5,
-    "Benzene": 2.1,
-    "Toluene": 4.3,
-    "Xylene": 1.0
-  }'
+  -d '{"date": "2020-01-15", "city": "Delhi",
+       "PM2.5": 98.4, "PM10": 152.0, "NO2": 43.1,
+       "SO2": 11.2, "CO": 1.8, "O3": 29.5}'
 ```
 
 ```json
 {
   "city": "Delhi",
   "date": "2020-01-15",
-  "risk_level": "High",
-  "probabilities": {"High": 0.73, "Low": 0.05, "Moderate": 0.22},
-  "daily_hrs": 0.412
+  "risk_level": "Moderate",
+  "probabilities": {"High": 0.1021, "Low": 0.1724, "Moderate": 0.7255},
+  "daily_hrs": 0.738567,
+  "history_days": 0
 }
 ```
 
-All pollutant fields are **optional** — missing values are imputed with
-training-set medians by the model's internal `SimpleImputer`.
+Sending 31 consecutive days of Delhi readings ending 2019-12-20 to
+`/predict/batch` gives a last result with full context:
 
-### Run the tests
-
-```bash
-pip install pytest httpx
-pytest tests/ -v
+```json
+{
+  "city": "Delhi",
+  "date": "2019-12-20",
+  "risk_level": "High",
+  "probabilities": {"High": 0.9434, "Low": 0.0029, "Moderate": 0.0537},
+  "daily_hrs": 0.876474,
+  "history_days": 30
+}
 ```
+
+Exact probabilities can differ slightly between platforms (for example,
+Windows and the Linux container) in the third decimal place. Test metrics are
+identical.
+
+`daily_hrs` is that day's composite exposure score, from 0 to 1. It is `null`
+when the measured pollutants cover less than 60% of the composite weight,
+which is the same rule used in training.
 
 ## Docker
 
-### Docker Compose (recommended)
+The multi-stage [`Dockerfile`](Dockerfile) **trains the model during the
+build** in a `trainer` stage. It then copies only the artifact into a slim
+`api` image that runs as a non-root user and has a built-in health check.
 
 ```bash
-# Builds the image (trains the model inside) and starts the API
-docker-compose up --build
+docker compose up --build          # build, train and serve on http://localhost:8000
 ```
 
-The API is live at <http://localhost:8000>.
-
-### Manual Docker build
+Without Compose:
 
 ```bash
-# Build — the trainer stage runs python train.py --fast automatically
 docker build -t air-quality-risk-api .
-
-# Run
 docker run -p 8000:8000 air-quality-risk-api
 ```
 
-To use a locally-trained artifact without rebuilding:
+To serve a locally trained artifact without rebuilding, mount it:
 
 ```bash
-docker run -p 8000:8000 \
-  -v "$(pwd)/artifacts:/app/artifacts:ro" \
-  -e MODEL_PATH=artifacts/model.joblib \
-  air-quality-risk-api
+docker run -p 8000:8000 -v "$(pwd)/artifacts:/app/artifacts:ro" air-quality-risk-api
 ```
 
-### Environment variables
-
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `MODEL_PATH` | `artifacts/model.joblib` | Path to the trained artifact |
+|---|---|---|
+| `MODEL_PATH` | `artifacts/model.joblib` | Path to the trained artifact inside the container |
+| `API_PORT` | `8000` | Host port published by `docker compose` |
 
-Copy `.env.example` to `.env` to override locally.
+Copy [`.env.example`](.env.example) to `.env` to override these values. Compose
+reads it automatically.
 
-The notebook is a thin narrative over `pipeline/`, rather than a self-contained
-script. Two reasons: the same code path is then covered by
-`verify_no_leakage.py`, and there is only one definition of each feature to keep
-correct. The original packed everything into notebook cells, which is how a
-variable came to be overwritten by its own rolling mean without anyone noticing
-(`FIXES.md` #7).
+## Testing and verification
 
-The **pre-fix notebook is in git history** at commit `d73d3d2`, so the cell
-numbers cited throughout [FIXES.md](FIXES.md) still resolve:
+```bash
+pytest tests/ -v              # API tests (no trained model needed)
+python verify_no_leakage.py   # anti-leakage invariants on the real data
+```
+
+**API tests** ([`tests/test_api.py`](tests/test_api.py)) use a mock artifact,
+so they run in CI before any training. They cover the endpoint contracts,
+input validation, the 503 path, request ordering, per-city isolation, and
+causal use of history in batch requests.
+
+**Leakage checks** ([`verify_no_leakage.py`](verify_no_leakage.py)) test each
+property this rebuild relies on by recomputing it independently:
+
+```
+[PASS] label at t == mean(hrs[t+1..t+7])                 2,002 rows, max diff 3.3e-16
+[PASS] features at t unchanged when the future is randomised   11,573 rows x 9 features
+[PASS] feature window ends at t, label window starts at t+1
+[PASS] embargo holds: last train label 2019-09-30 < test start 2019-10-01
+[PASS] train-only thresholds differ from full-data thresholds
+[PASS] every test city also appears in training (split is temporal, not by city)
+```
+
+The second check is the strongest. Every pollution value after 2018-06-30 is
+replaced with random noise, and every feature on or before that date stays
+bit-identical. Nothing looks forward.
+
+## Project structure
+
+```
+├── app/
+│   └── main.py                 FastAPI service (reuses pipeline/ for features)
+├── pipeline/
+│   ├── config.py               every tunable constant and split date
+│   ├── data.py                 loading, cleaning, data-quality gates
+│   ├── features.py             composite score, causal features, forward label
+│   └── models.py               baselines, models, tuning, evaluation
+├── notebooks/
+│   └── air_quality_health_risk_analysis.ipynb   the full analysis, with outputs
+├── tests/
+│   └── test_api.py             pytest suite for the API
+├── data/city_day.csv           source data (~2.5 MB)
+├── results/                    metrics, figures and run log from the reference run
+├── train.py                    CLI: train and save artifacts/model.joblib
+├── verify_no_leakage.py        executable checks of the core invariants
+├── Dockerfile                  two stages: train, then serve
+├── docker-compose.yml
+├── requirements.txt            training and notebook
+├── requirements-api.txt        serving
+├── requirements-dev.txt        everything, plus pytest and Jupyter
+└── FIXES.md                    every defect in the original, and its fix
+```
+
+The notebook is a thin narrative over `pipeline/` rather than a standalone
+script. As a result there is only one definition of each feature. Training,
+the API and `verify_no_leakage.py` all run that same code.
+
+## Limitations
+
+- **The margin over persistence is small** (+0.018 macro F1). This model is a
+  modest improvement on inertia, not a strong forecaster.
+- **Labels are relative, not clinical.** The risk levels are terciles of
+  training-set exposure, not medical or regulatory thresholds. The dataset has
+  no health-outcome data, so "health risk" is a proxy throughout.
+- **The pollutant weights are hand-assigned.** They are informed by the
+  health literature but not learned or validated against outcomes.
+- **No meteorology.** Wind, temperature, humidity and rainfall drive how
+  pollution disperses, and none of them are in the data.
+- **One pooled model for 18 different cities.** Per-city or hierarchical models
+  are not explored.
+- **The test window contains a structural break** (COVID-19). Both regimes are
+  reported, but a longer evaluation period would be better.
+- **Only two model families have been tried** (regularised linear and tree
+  ensemble). Gradient boosting and sequence models are not explored.
+
+## Why this rebuild exists
+
+The original notebook reported 89% accuracy, which looked like a solid result.
+It was not, for four compounding reasons:
+
+1. the label was built from the same window as the features;
+2. the "chronological" split was actually alphabetical by city;
+3. the label thresholds, scaler and imputer were all fitted on the full
+   dataset;
+4. there was no baseline to compare against.
+
+Fixing these drops accuracy from 89% to 75.1%. It also shows that a one-line
+persistence rule already reaches 73.7%. That result is less impressive but far
+more useful, because it says what this data can actually support.
+
+The pre-fix notebook is preserved in git history at commit `d73d3d2`, so the
+cell references in [FIXES.md](FIXES.md) still resolve:
 
 ```bash
 git show d73d3d2:notebooks/air_quality_health_risk_analysis.ipynb > original.ipynb
 ```
-
-### Verified invariants
-
-`verify_no_leakage.py` checks the properties this rebuild depends on, against
-independent recomputation rather than assertion — the original README claimed
-"strict temporal ordering to prevent leakage" while its split was alphabetical
-by city, so these are worth actually testing:
-
-```
-[PASS] label at t == mean(hrs[t+1..t+7])          2,002 rows, max diff 3.3e-16
-[PASS] features at t unchanged when the future is randomised
-                                                  11,573 rows x 9 features fixed
-[PASS] feature window ends at t, label window starts at t+1
-[PASS] embargo holds: last train label 2019-09-30 < test start 2019-10-01
-[PASS] train-only thresholds differ from full-data thresholds
-                        train (0.4032, 0.5935) vs full (0.3941, 0.5805)
-[PASS] split is temporal, not by city             18/18 cities in both
-```
-
-The second check is the strongest evidence: every pollution value after
-2018-06-30 is replaced with noise, and every feature at or before that date
-stays bit-identical. Nothing looks forward.
-
-The fifth quantifies the original's threshold leak — fitting cut points on the
-full dataset shifts them by roughly 0.01, because the test period's
-distribution was being folded into the label definition.
-
-## Why this rebuild exists
-
-The original notebook reported 89% accuracy and read as a solid result. It was
-not, for four compounding reasons: the label was built from the same window as
-the features; the "chronological" split was actually alphabetical by city; the
-label thresholds, scaler and imputer were all fitted on the full dataset; and
-there was no baseline to compare against.
-
-Fixing those drops accuracy from 89% to 75.1%, and reveals that a one-line
-persistence rule already achieves 73.7%. That is a much less impressive result
-and a much more useful one — it says what this data can actually support.
-
-Every figure quoted above is read from `results/metrics.json`, produced by the
-run in `notebooks/air_quality_health_risk_analysis.ipynb`. The notebook computes
-each number inline rather than restating it in prose, because during this
-rebuild I twice caught a hardcoded figure in *this README* drifting from what
-the pipeline actually returned after a config change — the same defect I flagged
-in the original (`FIXES.md` #24).
-
-The full list of defects and fixes, cell by cell, is in [FIXES.md](FIXES.md).

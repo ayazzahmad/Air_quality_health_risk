@@ -1,0 +1,6 @@
+# Everything: training, API, tests and the notebook.
+-r requirements.txt
+-r requirements-api.txt
+pytest==9.2.0
+httpx==0.28.1
+notebook
