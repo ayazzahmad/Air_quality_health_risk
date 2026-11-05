@@ -36,7 +36,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    MODEL_PATH=artifacts/model.joblib
+    MODEL_PATH=artifacts/model.joblib \
+    PORT=8000
 
 WORKDIR /app
 
@@ -54,10 +55,12 @@ COPY pipeline/ pipeline/
 RUN useradd --create-home --uid 10001 appuser
 USER appuser
 
+# Hosting platforms such as Render set PORT; it defaults to 8000 elsewhere
 EXPOSE 8000
 
 # python:slim has no curl, so the health check uses the standard library
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status == 200 else 1)"]
+    CMD ["python", "-c", "import os, urllib.request, sys; sys.exit(0 if urllib.request.urlopen(f\"http://localhost:{os.environ.get('PORT', '8000')}/health\", timeout=5).status == 200 else 1)"]
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form so ${PORT} is expanded; exec keeps uvicorn as PID 1 for clean shutdowns
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

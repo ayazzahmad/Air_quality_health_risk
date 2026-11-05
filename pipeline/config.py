@@ -9,6 +9,8 @@ from pathlib import Path
 # --- Paths (relative, so the project runs on any machine) ---------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_PATH = PROJECT_ROOT / "data" / "city_day.csv"
+# Daily ERA5 weather per city, produced by scripts/fetch_weather.py
+WEATHER_PATH = PROJECT_ROOT / "data" / "weather_daily.csv"
 RESULTS_DIR = PROJECT_ROOT / "results"
 
 RANDOM_STATE = 42
@@ -57,6 +59,22 @@ LABEL_HORIZON_DAYS = 7
 ROLLING_WINDOWS = [3, 7, 14, 30]
 VOLATILITY_WINDOWS = [7, 14]
 LAGS = [1, 7]
+
+# --- Weather -----------------------------------------------------------------
+# Daily weather columns in WEATHER_PATH. Weather for day t is known at the end
+# of day t, so it follows the same rule as pollution: features use days <= t.
+WEATHER_COLUMNS = [
+    "temp_mean", "temp_max", "temp_min", "precip_sum", "precip_hours",
+    "wind_mean", "wind_max", "wind_dir", "humidity_mean", "pressure_mean",
+    "blh_mean", "blh_max",
+]
+# Variables summarised into features, and the backward windows used (1 = day t)
+WEATHER_FEATURE_VARS = ["temp_mean", "precip_sum", "wind_mean", "humidity_mean", "blh_max"]
+WEATHER_WINDOWS = [1, 3, 7]
+# Beaufort "light air" tops out at 5 km/h; a day below this with no meaningful
+# rain is a stagnant, pollution-trapping day.
+CALM_WIND_KMH = 6.0
+DRY_PRECIP_MM = 1.0
 
 # --- Temporal split ----------------------------------------------------------
 # Every retained city has data starting before this date, so no city appears

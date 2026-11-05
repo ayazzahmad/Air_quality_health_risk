@@ -71,7 +71,7 @@ def main():
     poisoned.loc[future, "hrs"] = rng.uniform(0, 1, int(future.sum()))
     poisoned = feat.add_causal_features(poisoned)
 
-    hrs_feats = [c for c in feat.FEATURE_COLUMNS if c.startswith("hrs_")]
+    hrs_feats = [c for c in feat.POLLUTION_FEATURES if c.startswith("hrs_")]
     past = df["Date"] <= cut
     before = df.loc[past, hrs_feats].to_numpy()
     after = poisoned.loc[past, hrs_feats].to_numpy()
@@ -81,6 +81,43 @@ def main():
         "features at t are unchanged when the future is randomised",
         identical,
         f"{before.shape[0]:,} rows x {len(hrs_feats)} features held fixed",
+    )
+
+    # ---- 2b. Same test for the weather features ------------------------------
+    # Randomise every raw weather value after the cut. Past-only weather
+    # features must not move. As a positive control, the perfect-forecast
+    # (oracle) columns of the last days before the cut MUST move -- otherwise
+    # this check would be unable to detect a forward-looking feature at all.
+    def weather_frame(frame):
+        return feat.add_oracle_weather(feat.add_weather_features(frame)).sort_index()
+
+    clean_w = weather_frame(df)
+    poisoned_w = df.copy()
+    for col in cfg.WEATHER_COLUMNS:
+        poisoned_w.loc[future, col] = rng.uniform(
+            df[col].min(), df[col].max(), int(future.sum())
+        )
+    poisoned_w = weather_frame(poisoned_w)
+
+    def unchanged(cols, rows):
+        b = clean_w.loc[rows, cols].to_numpy()
+        a = poisoned_w.loc[rows, cols].to_numpy()
+        return (np.isnan(b) & np.isnan(a)) | (b == a), b
+
+    same, block = unchanged(feat.WEATHER_FEATURES, clean_w["Date"] <= cut)
+    check(
+        "weather features at t are unchanged when future weather is randomised",
+        bool(same.all()),
+        f"{block.shape[0]:,} rows x {len(feat.WEATHER_FEATURES)} features held fixed",
+    )
+
+    edge = (clean_w["Date"] <= cut) & (clean_w["Date"] > cut - pd.Timedelta(days=h))
+    same, block = unchanged(feat.ORACLE_WEATHER_FEATURES, edge)
+    moved = float((~same[~np.isnan(block)]).mean())
+    check(
+        "positive control: perfect-forecast weather columns DO move",
+        moved > 0.95,
+        f"{moved:.0%} of oracle values in the last {h} days before the cut changed",
     )
 
     # ---- 3. Label window and feature window never overlap -------------------

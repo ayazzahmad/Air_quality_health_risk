@@ -1,15 +1,20 @@
 # Exposure-Aware Air Quality Health Risk Forecasting
 
+[![CI](https://github.com/ayazzahmad/Air_quality_health_risk/actions/workflows/ci.yml/badge.svg)](https://github.com/ayazzahmad/Air_quality_health_risk/actions/workflows/ci.yml)
+
 Forecasting next-week air-pollution health risk (**Low / Moderate / High**) for
-18 Indian cities from daily multi-pollutant measurements (2015–2020). The model
-is served through a **FastAPI** service and packaged with **Docker**.
+18 Indian cities from daily multi-pollutant measurements and weather
+(2015–2020). The models are served through a **FastAPI** service and packaged
+with **Docker**.
 
 > **Headline:** 75.1% accuracy / **0.756 macro F1** on a held-out future
 > period. That is **+0.018 macro F1 over a one-line persistence rule**
-> ("next week looks like this week"). Reporting it against that baseline is
-> deliberate. An earlier version of this project reported 89% accuracy, and
-> that figure came from target leakage. This repository is the corrected
-> rebuild. Every defect and its fix is listed in [FIXES.md](FIXES.md).
+> ("next week looks like this week"). Adding daily weather does not improve
+> the risk classes, but it powers a separate **next-week exposure forecast**
+> that cuts error by **11%** against "no change". Reporting everything against
+> persistence is deliberate. An earlier version of this project reported 89%
+> accuracy, and that figure came from target leakage. This repository is the
+> corrected rebuild. Every defect and its fix is listed in [FIXES.md](FIXES.md).
 
 ---
 
@@ -43,20 +48,32 @@ mean that it "predicted" from that same window's own 3-day and 1-day parts.
 
 **Data:** [`data/city_day.csv`](data/city_day.csv) contains daily
 concentrations of PM2.5, PM10, NO₂, SO₂, CO, O₃ and the VOCs benzene, toluene
-and xylene, for 26 Indian cities from 2015 to 2020. It ships with the repo, so
-the project runs as soon as it is cloned.
+and xylene, for 26 Indian cities from 2015 to 2020.
+[`data/weather_daily.csv`](data/weather_daily.csv) adds daily ERA5 weather for
+the same cities and dates (temperature, rain, wind, humidity, pressure and
+boundary-layer height) from the free
+[Open-Meteo archive](https://open-meteo.com/en/docs/historical-weather-api),
+downloaded by [`scripts/fetch_weather.py`](scripts/fetch_weather.py). Both
+files ship with the repo, so the project runs as soon as it is cloned, with no
+network access.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     A[city_day.csv] --> B[Clean and gate<br/>pipeline/data.py]
+    W[weather_daily.csv] --> B
     B --> C[Composite exposure score<br/>percentile-ranked pollutants]
     C --> D[Causal features<br/>rolling means, lags, volatility,<br/>calendar, VOC, coverage]
+    B --> WF[Past weather features<br/>rain, wind, temperature,<br/>humidity, boundary layer]
     C --> E[Forward label<br/>mean exposure t+1..t+7]
-    D --> F[Random forest<br/>tuned with TimeSeriesSplit]
+    D --> F[Risk classifier<br/>random forest]
     E --> F
+    D --> R[Exposure forecast<br/>random forest regressor]
+    WF --> R
+    E --> R
     F --> G[artifacts/model.joblib]
+    R --> G
     G --> H[FastAPI service]
 ```
 
@@ -86,6 +103,7 @@ the pollutants actually measured, so no value is invented.
 | Momentum | lags of 1 and 7 days; 7-vs-14-day trend |
 | Calendar | cyclical month and day-of-week (sin/cos); winter flag |
 | Data quality | VOC index plus an explicit "VOC observed" flag; per-row pollutant coverage |
+| Weather (exposure forecast only) | day-*t*, 3-day and 7-day means of temperature, rain, wind, humidity and boundary-layer height; 3-day wind direction (as a unit vector); temperature trend; calm, dry days in the last week |
 
 **4. Label.** The label is the mean exposure over the next 7 days, binned into
 terciles. The cut points are fitted on **training data only**:
@@ -95,6 +113,11 @@ Low ≤ 0.403 < Moderate ≤ 0.593 < High.
 with a 7-day embargo before it so that no training label uses a test-period
 day. Every city appears on both sides of the cutoff. A random forest is tuned
 by grid search with forward-chaining `TimeSeriesSplit` on macro F1.
+
+**6. Exposure forecast.** A second random forest predicts next week's mean
+exposure score itself, not just its class. It predicts the *change* from this
+week's 7-day mean, using the pollution features plus past weather, and is tuned
+the same way on R². Its baseline is "no change".
 
 ## Results
 
@@ -170,6 +193,54 @@ Recent exposure levels dominate. Volatility carries essentially no signal, and
 there is no day-of-week effect. Both findings contradict claims made in the
 original write-up.
 
+### Weather and the exposure forecast
+
+Pollution history can only say "next week looks like this week". Weather is
+what changes air quality from week to week: rain washes particles out, wind
+disperses them, and a shallow boundary layer traps them near the ground. So
+two weather feature sets were tested:
+
+- **Past weather**, which ends at day *t* like every other feature.
+- **Perfect future weather**, the *observed* weather over *t+1 … t+7*. It isn't
+  available at forecast time, so it is never used in production. It stands in
+  for a perfect weather forecast, giving an **upper bound** on what a forecast
+  feed could add.
+
+Every choice was made on cross-validation over the training years.
+
+**Risk classifier: weather adds nothing measurable.**
+
+| Features | CV macro F1 | Test macro F1 |
+|---|---|---|
+| Pollution only (production) | 0.775 | 0.756 |
+| + past weather | 0.776 | 0.756 |
+| + perfect future weather (upper bound) | 0.783 | 0.763 |
+
+The classes are terciles of exposure, and most days sit far from the cut
+points, so a better estimate of next week's *change* rarely moves a day into a
+different class.
+
+**Exposure forecast: weather helps.** A random forest regressor predicts next
+week's mean exposure score directly, as this week's mean plus a predicted
+change.
+
+| Features | CV R² of change | Test R² of change | Test MAE |
+|---|---|---|---|
+| "No change" baseline | 0 | 0 | 0.0693 |
+| Pollution only | 0.147 | 0.180 | 0.0633 |
+| **+ past weather (production)** | **0.178** | **0.207** | **0.0618** |
+| + perfect future weather (upper bound) | 0.255 | 0.340 | 0.0569 |
+
+- **Past weather explains about 21% more of next week's change** than
+  pollution history alone, consistently across cross-validation and test.
+- **The forecast's error is 11% below "no change".**
+- **The gain is all pre-lockdown.** Before 2020-03-25 the error is 15% lower
+  (MAE 0.0642 vs 0.0751). During the lockdown it is level with "no change"
+  (0.0571 vs 0.0572), because weather patterns from 2015–2019 say nothing about
+  an abrupt drop in emissions.
+- **A real weather forecast feed is the obvious next step.** A perfect one
+  would nearly double the explained change.
+
 The figures are in [`results/`](results/), and the full narrative is in
 [`notebooks/air_quality_health_risk_analysis.ipynb`](notebooks/air_quality_health_risk_analysis.ipynb).
 The notebook is committed with its outputs, so it can be read without running
@@ -188,16 +259,24 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt   # training + API + tests + notebook
 ```
 
-**Train the model.** Both commands write `artifacts/model.joblib`.
+**Train the models.** Both commands train the risk classifier and the exposure
+forecast, and write them to `artifacts/model.joblib`.
 
 ```bash
 python train.py --fast   # ~30 s: tuned hyperparameters, no grid search
-python train.py          # several minutes: reruns the full grid search
+python train.py          # several minutes: reruns both grid searches
 ```
 
-Both produce the same model and the test metrics shown above.
-`--data <path>` and `--out <path>` override the input CSV and the output
-location.
+Both produce the same models and the test metrics shown above.
+`--data <path>`, `--weather <path>` and `--out <path>` override the pollution
+CSV, the weather CSV and the output location.
+
+**Refresh the weather data (optional).** The CSV is already in the repo. To
+download it again from Open-Meteo:
+
+```bash
+python scripts/fetch_weather.py
+```
 
 **Serve it.**
 
@@ -226,7 +305,7 @@ search is the slow part.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/` | Service ping. Always 200, and reports whether the model is loaded |
-| `GET` | `/health` | Model status, features, class order, risk thresholds, test metrics. 503 if no model |
+| `GET` | `/health` | Model status, features, class order, risk thresholds, test metrics for both models. 503 if no model |
 | `POST` | `/predict` | Prediction for a single city-day |
 | `POST` | `/predict/batch` | Up to 500 readings; uses each city's earlier days as history |
 | `GET` | `/docs`, `/redoc` | Interactive documentation |
@@ -240,18 +319,29 @@ search is the slow part.
 | `PM2.5` (or `PM2_5`), `PM10`, `NO2`, `SO2`, `CO`, `O3` | number ≥ 0 | Optional. Core pollutants |
 | `Benzene`, `Toluene`, `Xylene` | number ≥ 0 | Optional. Summed into the VOC index |
 | `HRS_lag1`, `HRS_7day_std` | number | Optional fallbacks, used only when the request has no history to compute them |
+| `temp_mean` (°C), `precip_sum` (mm), `wind_mean` (km/h), `wind_dir` (°), `humidity_mean` (%), `blh_max` (m) | number | Optional daily weather. Used only by the exposure forecast; missing values are filled with training medians |
+
+### Response fields
+
+| Field | Meaning |
+|---|---|
+| `risk_level`, `probabilities` | Next week's risk class and per-class probabilities (classifier) |
+| `forecast_exposure` | Next week's mean exposure score, 0–1 (regressor). `null` until the city has 7 days of scored history in the request |
+| `daily_hrs` | That day's composite exposure score, 0–1. `null` when the measured pollutants cover less than 60% of the composite weight, as in training |
+| `history_days` | Earlier days of this city available in the request (0–30) |
 
 ### History matters: `/predict` vs `/predict/batch`
 
-The model's strongest features are **rolling means over the past 3–30 days**.
-A single reading cannot supply them. In that case they are filled with
-training-set medians, so the prediction mostly reflects the season.
+The strongest features are **rolling means over the past 3–30 days**. A single
+reading cannot supply them. In that case they are filled with training-set
+medians, so the class mostly reflects the season and there is no exposure
+forecast.
 
 `/predict/batch` groups readings by city, orders them by date, and builds each
 reading's features from **that day and the earlier readings of the same city**.
 It never uses later days, and it uses the same pipeline code as training. To
-get a real forecast, send the **preceding 30 days** of a city. Each result
-includes `history_days` (0–30), which shows how much context it had.
+get a real forecast, send the **preceding 30 days** of a city, with weather if
+you have it.
 
 The same Delhi winter day, with and without history:
 
@@ -268,14 +358,24 @@ curl -X POST http://localhost:8000/predict \
   "city": "Delhi",
   "date": "2020-01-15",
   "risk_level": "Moderate",
-  "probabilities": {"High": 0.1021, "Low": 0.1724, "Moderate": 0.7255},
+  "probabilities": {"High": 0.0997, "Low": 0.1748, "Moderate": 0.7255},
   "daily_hrs": 0.738567,
-  "history_days": 0
+  "history_days": 0,
+  "forecast_exposure": null
 }
 ```
 
-Sending 31 consecutive days of Delhi readings ending 2019-12-20 to
-`/predict/batch` gives a last result with full context:
+Sending 31 consecutive days of Delhi readings with weather, ending 2019-12-20,
+to `/predict/batch`. The last reading looks like this:
+
+```json
+{"date": "2019-12-20", "city": "Delhi",
+ "PM2.5": 316.09, "PM10": 449.06, "NO2": 60.58, "SO2": 9.92, "CO": 2.16, "O3": 29.05,
+ "temp_mean": 13.0, "precip_sum": 0.0, "wind_mean": 5.1, "wind_dir": 338,
+ "humidity_mean": 79, "blh_max": 720}
+```
+
+and its result has full context:
 
 ```json
 {
@@ -284,17 +384,14 @@ Sending 31 consecutive days of Delhi readings ending 2019-12-20 to
   "risk_level": "High",
   "probabilities": {"High": 0.9434, "Low": 0.0029, "Moderate": 0.0537},
   "daily_hrs": 0.876474,
-  "history_days": 30
+  "history_days": 30,
+  "forecast_exposure": 0.7875
 }
 ```
 
-Exact probabilities can differ slightly between platforms (for example,
-Windows and the Linux container) in the third decimal place. Test metrics are
-identical.
-
-`daily_hrs` is that day's composite exposure score, from 0 to 1. It is `null`
-when the measured pollutants cover less than 60% of the composite weight,
-which is the same rule used in training.
+That week's mean exposure was 0.732. Cold, calm, dry air with a shallow
+boundary layer pointed upwards, and the model forecast **0.788**. The actual
+mean over the following 7 days was **0.790**.
 
 ## Docker
 
@@ -322,10 +419,30 @@ docker run -p 8000:8000 -v "$(pwd)/artifacts:/app/artifacts:ro" air-quality-risk
 | Variable | Default | Description |
 |---|---|---|
 | `MODEL_PATH` | `artifacts/model.joblib` | Path to the trained artifact inside the container |
+| `PORT` | `8000` | Port the server listens on inside the container (hosting platforms set this) |
 | `API_PORT` | `8000` | Host port published by `docker compose` |
 
 Copy [`.env.example`](.env.example) to `.env` to override these values. Compose
 reads it automatically.
+
+### Deploying to Render
+
+[`render.yaml`](render.yaml) is a Render Blueprint that describes the whole
+service: a free Docker web service in Singapore, built from the `Dockerfile`,
+health-checked on `/health`, deploying from `main`.
+
+1. Sign in at [render.com](https://render.com) with GitHub.
+2. Go to **New → Blueprint** and pick this repository. Render reads
+   `render.yaml`, so there's nothing else to fill in.
+3. Click **Deploy Blueprint**. The first build trains the model inside the
+   image and takes a few minutes.
+4. Open `https://<service-name>.onrender.com/docs`.
+
+Later pushes to `main` redeploy automatically, but **only after CI passes**
+(`autoDeployTrigger: checksPass`).
+
+Free instances sleep after about 15 minutes without traffic, so the first
+request after a pause can take up to a minute while the service wakes up.
 
 ## Testing and verification
 
@@ -334,10 +451,22 @@ pytest tests/ -v              # API tests (no trained model needed)
 python verify_no_leakage.py   # anti-leakage invariants on the real data
 ```
 
+**Continuous integration.** [GitHub Actions](.github/workflows/ci.yml) runs on
+every push and pull request:
+
+1. lint ([ruff](ruff.toml), correctness rules only);
+2. the API tests;
+3. the leakage checks;
+4. training both models, then a smoke test against the real model;
+5. building the Docker image (which trains inside it), starting the container,
+   waiting for `/health`, and sending real requests through it.
+
 **API tests** ([`tests/test_api.py`](tests/test_api.py)) use a mock artifact,
-so they run in CI before any training. They cover the endpoint contracts,
-input validation, the 503 path, request ordering, per-city isolation, and
-causal use of history in batch requests.
+so they run before any training. They cover the endpoint contracts,
+input validation, the 503 path, request ordering, per-city isolation, causal
+use of history in batch requests, and the exposure forecast (weather inputs,
+the 7-day history requirement, and loading older artifacts that have no
+forecast model).
 
 **Leakage checks** ([`verify_no_leakage.py`](verify_no_leakage.py)) test each
 property this rebuild relies on by recomputing it independently:
@@ -345,6 +474,9 @@ property this rebuild relies on by recomputing it independently:
 ```
 [PASS] label at t == mean(hrs[t+1..t+7])                 2,002 rows, max diff 3.3e-16
 [PASS] features at t unchanged when the future is randomised   11,573 rows x 9 features
+[PASS] weather features at t unchanged when future weather is randomised
+                                                         11,573 rows x 19 features
+[PASS] positive control: perfect-forecast weather columns DO move    100% changed
 [PASS] feature window ends at t, label window starts at t+1
 [PASS] embargo holds: last train label 2019-09-30 < test start 2019-10-01
 [PASS] train-only thresholds differ from full-data thresholds
@@ -353,7 +485,10 @@ property this rebuild relies on by recomputing it independently:
 
 The second check is the strongest. Every pollution value after 2018-06-30 is
 replaced with random noise, and every feature on or before that date stays
-bit-identical. Nothing looks forward.
+bit-identical. Nothing looks forward. The weather check does the same with
+future weather. Its positive control confirms that the perfect-forecast
+columns, which *do* look forward, are caught, so the check is able to detect a
+leak rather than passing by default.
 
 ## Project structure
 
@@ -369,12 +504,20 @@ bit-identical. Nothing looks forward.
 │   └── air_quality_health_risk_analysis.ipynb   the full analysis, with outputs
 ├── tests/
 │   └── test_api.py             pytest suite for the API
-├── data/city_day.csv           source data (~2.5 MB)
+├── scripts/
+│   └── fetch_weather.py        downloads daily weather from Open-Meteo
+├── data/
+│   ├── city_day.csv            pollution data (~2.5 MB)
+│   ├── weather_daily.csv       daily weather per city (~4.5 MB)
+│   └── weather_locations.csv   requested vs. actual weather grid point per city
 ├── results/                    metrics, figures and run log from the reference run
-├── train.py                    CLI: train and save artifacts/model.joblib
+├── train.py                    CLI: train both models, save artifacts/model.joblib
 ├── verify_no_leakage.py        executable checks of the core invariants
+├── .github/workflows/ci.yml    CI: lint, tests, leakage checks, training, Docker
+├── ruff.toml                   lint configuration
 ├── Dockerfile                  two stages: train, then serve
 ├── docker-compose.yml
+├── render.yaml                 Render Blueprint for the public deployment
 ├── requirements.txt            training and notebook
 ├── requirements-api.txt        serving
 ├── requirements-dev.txt        everything, plus pytest and Jupyter
@@ -394,8 +537,9 @@ the API and `verify_no_leakage.py` all run that same code.
   no health-outcome data, so "health risk" is a proxy throughout.
 - **The pollutant weights are hand-assigned.** They are informed by the
   health literature but not learned or validated against outcomes.
-- **No meteorology.** Wind, temperature, humidity and rainfall drive how
-  pollution disperses, and none of them are in the data.
+- **Weather is past-only.** It improves the exposure forecast but not the
+  risk classes, and it does not help during the lockdown. A real weather
+  *forecast* feed would likely help more, but is untested.
 - **One pooled model for 18 different cities.** Per-city or hierarchical models
   are not explored.
 - **The test window contains a structural break** (COVID-19). Both regimes are

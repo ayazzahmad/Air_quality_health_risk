@@ -1,0 +1,18 @@
+# Render Blueprint: deploys the API from the Dockerfile.
+# In the Render dashboard: New -> Blueprint -> pick this repository.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: air-quality-risk-api
+    runtime: docker
+    plan: free
+    region: singapore              # closest Render region to India
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # Redeploy only after the GitHub Actions checks on the commit pass
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: MODEL_PATH
+        value: artifacts/model.joblib

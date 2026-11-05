@@ -21,6 +21,7 @@ import os
 from typing import Dict, List, Optional
 
 import joblib
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,7 +30,7 @@ from pipeline import config as cfg
 from pipeline import data as data_mod
 from pipeline import features as feat
 
-API_VERSION = "1.2.0"
+API_VERSION = "1.3.0"
 
 # ---------------------------------------------------------------------------
 # Load model artifact once at startup
@@ -38,6 +39,7 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "artifacts/model.joblib")
 
 _model_loaded = False
 _load_error   = ""
+_regressor    = None   # optional: artifacts from before v1.3 have no regressor
 
 try:
     _artifact     = joblib.load(MODEL_PATH)
@@ -48,6 +50,9 @@ try:
     _low_th       = float(_artifact["low_th"])
     _high_th      = float(_artifact["high_th"])
     _test_metrics = _artifact.get("test_metrics", {})
+    _regressor    = _artifact.get("regressor")           # next-week exposure change
+    _reg_features = _artifact.get("regressor_features", [])
+    _reg_metrics  = _artifact.get("regressor_metrics", {})
     _model_loaded = True
 except Exception as exc:
     _load_error = str(exc)
@@ -60,11 +65,13 @@ app = FastAPI(
     description=(
         "Predicts the **next-week air-pollution health risk** "
         "(`Low` / `Moderate` / `High`) for Indian cities from daily "
-        "pollutant measurements.\n\n"
-        "The model uses a **QuantileTransformer** (percentile-rank) composite "
-        "score, causal rolling-window features, and a tuned "
-        "**RandomForestClassifier**. Held-out test metrics are reported by "
-        "`GET /health`.\n\n"
+        "pollutant measurements, plus a forecast of next week's mean "
+        "**exposure score** (0–1) that also uses daily weather.\n\n"
+        "The models use a **QuantileTransformer** (percentile-rank) composite "
+        "score, causal rolling-window features, a tuned "
+        "**RandomForestClassifier** for the risk level and a "
+        "**RandomForestRegressor** for the exposure forecast. Held-out test "
+        "metrics for both are reported by `GET /health`.\n\n"
         "**Before starting the server**, train the model:\n"
         "```\npython train.py --fast\n```"
     ),
@@ -96,6 +103,10 @@ class PollutantReading(BaseModel):
 
     `HRS_lag1` and `HRS_7day_std` are only used when they cannot be computed
     from earlier readings of the same city in the request.
+
+    **Weather fields are optional** and only feed the exposure forecast. Use
+    daily values for the same city and date (e.g. from Open-Meteo); missing
+    weather is filled with training-set medians.
     """
     model_config = ConfigDict(validate_by_name=True, validate_by_alias=True)
 
@@ -132,6 +143,24 @@ class PollutantReading(BaseModel):
         description="Std. dev. of the composite score over the last 7 days",
     )
 
+    # Daily weather (optional; exposure forecast only)
+    temp_mean:     Optional[float] = Field(
+        None, ge=-60, le=60, examples=[15.4], description="Mean temperature at 2 m (°C)")
+    precip_sum:    Optional[float] = Field(
+        None, ge=0, examples=[0.0], description="Total precipitation (mm)")
+    wind_mean:     Optional[float] = Field(
+        None, ge=0, examples=[9.8], description="Mean wind speed at 10 m (km/h)")
+    wind_dir:      Optional[float] = Field(
+        None, ge=0, le=360, examples=[288], description="Dominant wind direction (degrees)")
+    humidity_mean: Optional[float] = Field(
+        None, ge=0, le=100, examples=[70], description="Mean relative humidity (%)")
+    blh_max:       Optional[float] = Field(
+        None, ge=0, examples=[996], description="Daily maximum boundary-layer height (m)")
+
+
+# Weather inputs the exposure features are built from
+_WEATHER_INPUTS = cfg.WEATHER_FEATURE_VARS + ["wind_dir"]
+
 
 class PredictionResponse(BaseModel):
     city:          str
@@ -145,6 +174,10 @@ class PredictionResponse(BaseModel):
     history_days:  int = Field(
         ..., description="Earlier days of this city available in the request "
                          "for the rolling features (30 gives full context)",
+    )
+    forecast_exposure: Optional[float] = Field(
+        None, description="Forecast mean exposure score (0–1) over the next 7 "
+                          "days; null without 7 days of scored history",
     )
 
 
@@ -180,8 +213,8 @@ def _build_features(readings: List[PollutantReading]) -> pd.DataFrame:
     Readings of the same city are treated as one daily time series: the frame
     is reindexed to a contiguous calendar (so row-based windows equal day
     windows, as in training), forward-filled causally, scored, and passed
-    through `add_causal_features`. Features of a day therefore only use that
-    day and earlier ones.
+    through `add_causal_features` and `add_weather_features`. Features of a
+    day therefore only use that day and earlier ones.
     """
     raw = pd.DataFrame([
         {
@@ -192,13 +225,13 @@ def _build_features(readings: List[PollutantReading]) -> pd.DataFrame:
             "SO2": r.SO2, "CO": r.CO, "O3": r.O3,
             "Benzene": r.Benzene, "Toluene": r.Toluene, "Xylene": r.Xylene,
             "_lag1": r.HRS_lag1, "_std7": r.HRS_7day_std,
+            **{w: getattr(r, w) for w in _WEATHER_INPUTS},
         }
         for i, r in enumerate(readings)
     ])
-    pollutant_cols = cfg.CORE_POLLUTANTS + cfg.VOC_POLLUTANTS
-    raw[pollutant_cols + ["_lag1", "_std7"]] = (
-        raw[pollutant_cols + ["_lag1", "_std7"]].astype(float)
-    )
+    numeric_cols = (cfg.CORE_POLLUTANTS + cfg.VOC_POLLUTANTS
+                    + ["_lag1", "_std7"] + _WEATHER_INPUTS)
+    raw[numeric_cols] = raw[numeric_cols].astype(float)
 
     dupes = raw[raw.duplicated(["_city", "Date"], keep=False)]
     if not dupes.empty:
@@ -229,6 +262,7 @@ def _build_features(readings: List[PollutantReading]) -> pd.DataFrame:
     df["hrs_valid"] = df["weight_coverage"] >= cfg.MIN_ROW_WEIGHT_COVERAGE
     df = feat.apply_composite_score(df, _ranker)
     df = feat.add_causal_features(df)
+    df = feat.add_weather_features(df)
     df["history_days"] = df.groupby("City").cumcount().clip(upper=_MAX_LOOKBACK_DAYS)
 
     out = df[df["_pos"].notna()].sort_values("_pos").reset_index(drop=True)
@@ -248,6 +282,13 @@ def _predict(readings: List[PollutantReading]) -> List[PredictionResponse]:
     preds = _model.predict(X)
     proba = _model.predict_proba(X)
 
+    # Exposure forecast = this week's mean + predicted change; needs a full
+    # 7-day mean, so it is null for readings without that history.
+    forecast = pd.Series(np.nan, index=feats.index)
+    if _regressor is not None:
+        change = _regressor.predict(feats[_reg_features])
+        forecast = (feats["hrs_mean_7"] + change).clip(0, 1)
+
     results = []
     for i, r in enumerate(readings):
         hrs = feats.at[i, "hrs"]
@@ -257,10 +298,12 @@ def _predict(readings: List[PollutantReading]) -> List[PredictionResponse]:
             risk_level=str(preds[i]),
             probabilities={
                 str(cls): round(float(p), 4)
-                for cls, p in zip(_model.classes_, proba[i])
+                for cls, p in zip(_model.classes_, proba[i], strict=True)
             },
             daily_hrs=round(float(hrs), 6) if pd.notna(hrs) else None,
             history_days=int(feats.at[i, "history_days"]),
+            forecast_exposure=(round(float(forecast[i]), 4)
+                               if pd.notna(forecast[i]) else None),
         ))
     return results
 
@@ -297,6 +340,12 @@ def health():
         "classes":         _classes,
         "risk_thresholds": {"low": _low_th, "high": _high_th},
         "test_metrics":    _test_metrics,
+        "exposure_forecast": {
+            "available":    _regressor is not None,
+            "model":        "RandomForestRegressor" if _regressor is not None else None,
+            "n_features":   len(_reg_features) if _regressor is not None else 0,
+            "test_metrics": _reg_metrics if _regressor is not None else {},
+        },
     }
 
 
@@ -318,7 +367,8 @@ def predict(reading: PollutantReading):
 
     For real forecasts send the preceding 30 days of the city to
     `/predict/batch`; the response's `history_days` shows how much history
-    each prediction actually had.
+    each prediction actually had. `forecast_exposure` needs at least 7 days of
+    history, so it is always null here.
     """
     return _predict([reading])[0]
 

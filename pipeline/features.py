@@ -132,13 +132,90 @@ def add_causal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-FEATURE_COLUMNS = (
+POLLUTION_FEATURES = (
     [f"hrs_mean_{w}" for w in cfg.ROLLING_WINDOWS]
     + [f"hrs_std_{w}" for w in cfg.VOLATILITY_WINDOWS]
     + [f"hrs_lag_{lag}" for lag in cfg.LAGS]
     + ["hrs_trend", "month_sin", "month_cos", "dow_sin", "dow_cos", "is_winter",
        "voc_index", "voc_observed", "weight_coverage"]
 )
+
+
+# --- Weather features --------------------------------------------------------
+
+def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Weather summaries computed strictly from days <= t, within each city.
+
+    Same availability rule as the pollution features: day t's weather is
+    observed by the end of day t, and nothing later is used. Windows require
+    complete data (`min_periods == window`).
+    """
+    df = df.sort_values(["City", "Date"]).copy()
+    g = df.groupby("City", sort=False)
+
+    for var in cfg.WEATHER_FEATURE_VARS:
+        for w in cfg.WEATHER_WINDOWS:
+            df[f"{var}_{w}d"] = g[var].transform(
+                lambda s, w=w: s.rolling(w, min_periods=w).mean()
+            )
+
+    # Wind direction is circular (359 deg is next to 0 deg), so it is averaged
+    # as a unit vector rather than as a raw angle.
+    rad = np.deg2rad(df["wind_dir"])
+    df["_wind_dir_sin"], df["_wind_dir_cos"] = np.sin(rad), np.cos(rad)
+    for comp in ("sin", "cos"):
+        df[f"wind_dir_{comp}_3"] = g[f"_wind_dir_{comp}"].transform(
+            lambda s: s.rolling(3, min_periods=3).mean()
+        )
+    df = df.drop(columns=["_wind_dir_sin", "_wind_dir_cos"])
+
+    # Season turning: is the last week colder or warmer than the last month?
+    temp_30 = g["temp_mean"].transform(lambda s: s.rolling(30, min_periods=30).mean())
+    df["temp_trend"] = df["temp_mean_7d"] - temp_30
+
+    # Stagnant, pollution-trapping days in the past week
+    calm_dry = ((df["wind_mean"] < cfg.CALM_WIND_KMH)
+                & (df["precip_sum"] < cfg.DRY_PRECIP_MM)).astype(float)
+    calm_dry = calm_dry.where(df[["wind_mean", "precip_sum"]].notna().all(axis=1))
+    df["calm_dry_days_7"] = calm_dry.groupby(df["City"], sort=False).transform(
+        lambda s: s.rolling(7, min_periods=7).sum()
+    )
+    return df
+
+
+WEATHER_FEATURES = (
+    [f"{v}_{w}d" for v in cfg.WEATHER_FEATURE_VARS for w in cfg.WEATHER_WINDOWS]
+    + ["wind_dir_sin_3", "wind_dir_cos_3", "temp_trend", "calm_dry_days_7"]
+)
+
+
+def add_oracle_weather(df: pd.DataFrame) -> pd.DataFrame:
+    """OBSERVED weather over the label window t+1 .. t+H.
+
+    This is NOT available at forecast time. It stands in for a perfect weather
+    forecast, to measure how much a real forecast feed could add at most. It
+    must never be part of the production feature set; verify_no_leakage.py
+    checks that these columns do move when the future changes.
+    """
+    h = cfg.LABEL_HORIZON_DAYS
+    df = df.sort_values(["City", "Date"]).copy()
+    g = df.groupby("City", sort=False)
+    for var in cfg.WEATHER_FEATURE_VARS:
+        df[f"{var}_next_{h}"] = g[var].transform(
+            lambda s: s.rolling(h, min_periods=h).mean().shift(-h)
+        )
+    return df
+
+
+ORACLE_WEATHER_FEATURES = [
+    f"{v}_next_{cfg.LABEL_HORIZON_DAYS}" for v in cfg.WEATHER_FEATURE_VARS
+]
+
+# Production feature sets. Past weather adds nothing measurable to the risk
+# classifier (CV macro F1 0.775 -> 0.776), but ~20% to the R^2 of the
+# next-week exposure forecast (0.147 -> 0.178), so only the regressor uses it.
+FEATURE_COLUMNS = POLLUTION_FEATURES
+EXPOSURE_FEATURES = POLLUTION_FEATURES + WEATHER_FEATURES
 
 
 # --- Forward-looking label ---------------------------------------------------

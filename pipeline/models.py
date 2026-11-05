@@ -8,11 +8,14 @@ this week" -- and any model that cannot beat it is not adding information.
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (
+    accuracy_score, classification_report, confusion_matrix, f1_score,
+    mean_absolute_error, r2_score,
+)
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -118,6 +121,64 @@ def tune_random_forest(X_train, y_train, dates_train, n_splits: int = 4):
     )
     search.fit(Xo, yo)
     return search
+
+
+# --- Exposure forecast (regression) ------------------------------------------
+# The classifier's terciles hide most of what weather adds: a better estimate
+# of next week's change rarely moves a day across a class boundary. So the
+# exposure score itself is forecast too. The regressor predicts the CHANGE from
+# this week's mean (hrs_mean_7); "no change" is its persistence baseline.
+
+def build_exposure_regressor(n_jobs: int = 1, **params) -> Pipeline:
+    """Random forest regressor for next-week change in exposure.
+
+    Defaults are the tuned values (CV R^2 of change 0.178 with weather).
+    `n_jobs` defaults to 1 for the same nested-parallelism reason as
+    `build_random_forest`.
+    """
+    rf_params = dict(n_estimators=400, min_samples_leaf=20, max_features=0.33,
+                     random_state=cfg.RANDOM_STATE, n_jobs=n_jobs)
+    rf_params.update(params)
+    return Pipeline([
+        ("impute", SimpleImputer(strategy="median")),
+        ("reg", RandomForestRegressor(**rf_params)),
+    ])
+
+
+REG_GRID = {
+    "reg__min_samples_leaf": [5, 20, 50],
+    "reg__max_features": [0.33, "sqrt"],
+}
+
+
+def tune_exposure_regressor(X_train, change_train, dates_train, n_splits: int = 4):
+    """Tune on R^2 of the change with forward-chaining CV, like the classifier."""
+    order = np.argsort(dates_train.to_numpy(), kind="stable")
+    search = GridSearchCV(
+        build_exposure_regressor(),
+        REG_GRID,
+        scoring="r2",
+        cv=TimeSeriesSplit(n_splits=n_splits),
+        n_jobs=-1,
+        refit=True,
+    )
+    search.fit(X_train.iloc[order], np.asarray(change_train)[order])
+    return search
+
+
+def exposure_report(model, X_test, current_week_mean, target) -> dict:
+    """Forecast metrics next to the "no change" (persistence) baseline."""
+    current = np.asarray(current_week_mean, dtype=float)
+    target = np.asarray(target, dtype=float)
+    change_pred = model.predict(X_test)
+    level_pred = current + change_pred
+    return {
+        "r2_change": float(r2_score(target - current, change_pred)),
+        "r2_level": float(r2_score(target, level_pred)),
+        "r2_level_persistence": float(r2_score(target, current)),
+        "mae": float(mean_absolute_error(target, level_pred)),
+        "mae_persistence": float(mean_absolute_error(target, current)),
+    }
 
 
 # --- Reporting ---------------------------------------------------------------
