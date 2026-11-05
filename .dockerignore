@@ -1,17 +1,17 @@
+.git/
+.gitattributes
 __pycache__/
 *.py[cod]
-*.pyc
 .venv/
+venv/
 .env
+.pytest_cache/
 # Model artifact — regenerated during docker build by train.py
 artifacts/
-results/*.png
 *.joblib
-notebooks/.ipynb_checkpoints/
-# Tests are not needed in the image
+# Not needed in either image
+notebooks/
+results/
 tests/
-# Dev files
 .env.example
 *.md
-!artifacts/README.md
-

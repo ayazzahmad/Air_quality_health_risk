@@ -2,26 +2,34 @@
 app/main.py – FastAPI service for Air Quality Health Risk prediction.
 
 The model artifact is produced by  train.py  and loaded once at startup.
-All preprocessing (QuantileTransformer ranking, composite score, causal
-features) mirrors the production pipeline in pipeline/.
+Features are built with the same functions the training pipeline uses
+(pipeline/data.py and pipeline/features.py), so serving cannot drift from
+training.
 
 Endpoints
 ---------
 GET  /                  Service ping
 GET  /health            Model status, features, risk thresholds, test metrics
 POST /predict           Single city-day prediction from raw pollutant values
-POST /predict/batch     Batch predictions
+POST /predict/batch     Batch predictions; consecutive days of a city are used
+                        as history for the rolling features
 GET  /docs              Auto-generated Swagger UI (FastAPI built-in)
 GET  /redoc             ReDoc alternative UI
 """
+import datetime as dt
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import joblib
-import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from pipeline import config as cfg
+from pipeline import data as data_mod
+from pipeline import features as feat
+
+API_VERSION = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # Load model artifact once at startup
@@ -32,13 +40,13 @@ _model_loaded = False
 _load_error   = ""
 
 try:
-    _artifact    = joblib.load(MODEL_PATH)
-    _model       = _artifact["model"]       # sklearn Pipeline (imputer + RF)
-    _ranker      = _artifact["ranker"]      # QuantileTransformer fitted on train
-    _features    = _artifact["features"]    # ordered list of feature column names
-    _classes     = _artifact["classes"]     # ["High", "Low", "Moderate"] sorted
-    _low_th      = float(_artifact["low_th"])
-    _high_th     = float(_artifact["high_th"])
+    _artifact     = joblib.load(MODEL_PATH)
+    _model        = _artifact["model"]       # sklearn Pipeline (imputer + RF)
+    _ranker       = _artifact["ranker"]      # QuantileTransformer fitted on train
+    _features     = _artifact["features"]    # ordered list of feature column names
+    _classes      = _artifact["classes"]     # model.classes_ order
+    _low_th       = float(_artifact["low_th"])
+    _high_th      = float(_artifact["high_th"])
     _test_metrics = _artifact.get("test_metrics", {})
     _model_loaded = True
 except Exception as exc:
@@ -55,72 +63,88 @@ app = FastAPI(
         "pollutant measurements.\n\n"
         "The model uses a **QuantileTransformer** (percentile-rank) composite "
         "score, causal rolling-window features, and a tuned "
-        "**RandomForestClassifier** (macro F1 ≈ 0.756 on held-out test data).\n\n"
+        "**RandomForestClassifier**. Held-out test metrics are reported by "
+        "`GET /health`.\n\n"
         "**Before starting the server**, train the model:\n"
         "```\npython train.py --fast\n```"
     ),
-    version="1.1.0",
+    version=API_VERSION,
     license_info={"name": "MIT"},
 )
 
 # ---------------------------------------------------------------------------
-# Schema helpers
+# Schemas
 # ---------------------------------------------------------------------------
-CORE_POLLUTANTS = ["PM2.5", "PM10", "NO2", "SO2", "CO", "O3"]
-VOC_POLLUTANTS  = ["Benzene", "Toluene", "Xylene"]
+# A batch may span long gaps; gaps wider than the longest feature window are
+# split into separate segments instead of being filled with empty days.
+_MAX_LOOKBACK_DAYS = max(cfg.ROLLING_WINDOWS + cfg.VOLATILITY_WINDOWS + cfg.LAGS)
+
+
+def _conc(example: float, alias: Optional[str] = None):
+    """Optional, non-negative pollutant concentration field."""
+    return Field(None, alias=alias, ge=0, examples=[example])
 
 
 class PollutantReading(BaseModel):
     """
     Raw daily pollutant concentrations for a single city-day.
 
-    **All pollutant fields are optional.** Missing values are handled
-    by the imputer that is baked into the model pipeline — they will be
-    filled with the training-set median for each feature.
+    **All pollutant fields are optional.** As in training, a day whose
+    observed pollutants cover less than 60% of the composite weight gets no
+    exposure score; missing features are filled with training-set medians by
+    the imputer inside the model pipeline.
 
-    `HRS_lag1` and `voc_index` are derived automatically when not
-    provided; supply them directly if you have pre-computed values.
+    `HRS_lag1` and `HRS_7day_std` are only used when they cannot be computed
+    from earlier readings of the same city in the request.
     """
-    date: str = Field(
-        ..., example="2020-01-15",
-        description="ISO-8601 date string (YYYY-MM-DD)",
+    model_config = ConfigDict(validate_by_name=True, validate_by_alias=True)
+
+    date: dt.date = Field(
+        ..., examples=["2020-01-15"],
+        description="ISO-8601 date (YYYY-MM-DD)",
     )
     city: str = Field(
-        ..., example="Delhi",
-        description="City name — used for display only, not for prediction",
+        ..., min_length=1, examples=["Delhi"],
+        description="City name — groups readings into a time series; "
+                    "not itself a model feature",
     )
 
-    # Core pollutants (µg/m³ unless noted)
-    PM2_5:   Optional[float] = Field(None, alias="PM2.5", example=98.4)
-    PM10:    Optional[float] = Field(None, example=152.0)
-    NO2:     Optional[float] = Field(None, example=43.1)
-    SO2:     Optional[float] = Field(None, example=11.2)
-    CO:      Optional[float] = Field(None, example=1.8)
-    O3:      Optional[float] = Field(None, example=29.5)
+    # Core pollutants (µg/m³; CO in mg/m³)
+    PM2_5:   Optional[float] = _conc(98.4, alias="PM2.5")
+    PM10:    Optional[float] = _conc(152.0)
+    NO2:     Optional[float] = _conc(43.1)
+    SO2:     Optional[float] = _conc(11.2)
+    CO:      Optional[float] = _conc(1.8)
+    O3:      Optional[float] = _conc(29.5)
 
     # VOC group — summed into voc_index; all optional
-    Benzene: Optional[float] = Field(None, example=2.1)
-    Toluene: Optional[float] = Field(None, example=4.3)
-    Xylene:  Optional[float] = Field(None, example=1.0)
+    Benzene: Optional[float] = _conc(2.1)
+    Toluene: Optional[float] = _conc(4.3)
+    Xylene:  Optional[float] = _conc(1.0)
 
-    # Pre-computed rolling / lag features (optional)
-    # Provide these if you are calling the API for a date that is part of a
-    # longer city time-series and you have already computed the rolling stats.
-    HRS_lag1:    Optional[float] = Field(None, example=0.072)
-    HRS_7day_std: Optional[float] = Field(None, example=0.018)
-
-    class Config:
-        # Accept both "PM2.5" (alias) and "PM2_5" (field name)
-        populate_by_name = True
+    # Pre-computed history features (optional fallbacks)
+    HRS_lag1:     Optional[float] = Field(
+        None, ge=0, le=1, examples=[0.72],
+        description="Previous day's composite score (0–1)",
+    )
+    HRS_7day_std: Optional[float] = Field(
+        None, ge=0, examples=[0.05],
+        description="Std. dev. of the composite score over the last 7 days",
+    )
 
 
 class PredictionResponse(BaseModel):
     city:          str
-    date:          str
+    date:          dt.date
     risk_level:    str = Field(..., description="Low | Moderate | High")
-    probabilities: dict = Field(..., description="Per-class probabilities")
+    probabilities: Dict[str, float] = Field(..., description="Per-class probabilities")
     daily_hrs:     Optional[float] = Field(
-        None, description="Computed daily health-risk score (0–1)"
+        None, description="Computed daily health-risk score (0–1); null when "
+                          "too few pollutants were observed",
+    )
+    history_days:  int = Field(
+        ..., description="Earlier days of this city available in the request "
+                         "for the rolling features (30 gives full context)",
     )
 
 
@@ -133,108 +157,112 @@ class BatchResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Feature-construction helper
+# Feature construction
 # ---------------------------------------------------------------------------
 
-def _build_feature_row(r: PollutantReading) -> tuple[pd.DataFrame, float]:
-    """
-    Convert one PollutantReading into a one-row feature DataFrame whose
-    columns match `_features`, using the same logic as the production pipeline.
-
-    Returns (feature_df, daily_hrs).
-    NaN values are left as-is; the SimpleImputer inside the model pipeline
-    fills them with training-set medians.
-    """
+def _require_model() -> None:
     if not _model_loaded:
-        raise HTTPException(503, detail=f"Model not loaded: {_load_error}")
+        raise HTTPException(
+            503,
+            detail=(
+                f"Model not loaded: {_load_error}. "
+                "Run `python train.py --fast` to generate artifacts/model.joblib."
+            ),
+        )
 
-    # -- 1. Build a one-row pollutant DataFrame --------------------------------
-    raw = {
-        "PM2.5": r.PM2_5,
-        "PM10":  r.PM10,
-        "NO2":   r.NO2,
-        "SO2":   r.SO2,
-        "CO":    r.CO,
-        "O3":    r.O3,
-    }
-    poll_df = pd.DataFrame([raw], columns=CORE_POLLUTANTS).astype(float)
 
-    # -- 2. Percentile-rank the pollutants (QuantileTransformer) ---------------
-    # The ranker was fitted on training data; calling transform here mirrors
-    # exactly what add_causal_features does inside the notebook/train pipeline.
-    ranked = pd.DataFrame(
-        _ranker.transform(poll_df),
-        columns=CORE_POLLUTANTS,
+def _build_features(readings: List[PollutantReading]) -> pd.DataFrame:
+    """
+    Turn readings into model features using the training pipeline's own
+    functions. Returns one row per reading, in request order, with the
+    feature columns plus `hrs` and `history_days`.
+
+    Readings of the same city are treated as one daily time series: the frame
+    is reindexed to a contiguous calendar (so row-based windows equal day
+    windows, as in training), forward-filled causally, scored, and passed
+    through `add_causal_features`. Features of a day therefore only use that
+    day and earlier ones.
+    """
+    raw = pd.DataFrame([
+        {
+            "_pos": i,
+            "_city": r.city,
+            "Date": pd.Timestamp(r.date),
+            "PM2.5": r.PM2_5, "PM10": r.PM10, "NO2": r.NO2,
+            "SO2": r.SO2, "CO": r.CO, "O3": r.O3,
+            "Benzene": r.Benzene, "Toluene": r.Toluene, "Xylene": r.Xylene,
+            "_lag1": r.HRS_lag1, "_std7": r.HRS_7day_std,
+        }
+        for i, r in enumerate(readings)
+    ])
+    pollutant_cols = cfg.CORE_POLLUTANTS + cfg.VOC_POLLUTANTS
+    raw[pollutant_cols + ["_lag1", "_std7"]] = (
+        raw[pollutant_cols + ["_lag1", "_std7"]].astype(float)
     )
 
-    # -- 3. Weighted composite score (renormalise over observed pollutants) -----
-    from pipeline import config as cfg
-    weighted_sum   = 0.0
-    weight_present = 0.0
-    for p in CORE_POLLUTANTS:
-        w = cfg.POLLUTANT_WEIGHTS[p]
-        v = ranked[p].iloc[0]
-        if not np.isnan(v):
-            weighted_sum   += v * w
-            weight_present += w
+    dupes = raw[raw.duplicated(["_city", "Date"], keep=False)]
+    if not dupes.empty:
+        first = dupes.iloc[0]
+        raise HTTPException(
+            422,
+            detail=f"Duplicate reading for city '{first['_city']}' on "
+                   f"{first['Date'].date()}",
+        )
 
-    daily_hrs = (weighted_sum / weight_present) if weight_present > 0 else np.nan
+    # Split each city into segments separated by gaps longer than any feature
+    # window, then reindex each segment to a contiguous daily calendar.
+    raw = raw.sort_values(["_city", "Date"])
+    gap = raw.groupby("_city")["Date"].diff().dt.days
+    raw["_segment"] = (gap.isna() | (gap > _MAX_LOOKBACK_DAYS)).cumsum()
 
-    # -- 4. Temporal features --------------------------------------------------
-    dt         = pd.Timestamp(r.date)
-    month      = dt.month
-    dayofweek  = dt.dayofweek
-    is_winter  = int(month in [11, 12, 1, 2])
-    month_sin  = float(np.sin(2 * np.pi * month / 12))
-    month_cos  = float(np.cos(2 * np.pi * month / 12))
-    dow_sin    = float(np.sin(2 * np.pi * dayofweek / 7))
-    dow_cos    = float(np.cos(2 * np.pi * dayofweek / 7))
+    frames = []
+    for seg, g in raw.groupby("_segment", sort=False):
+        days = pd.date_range(g["Date"].min(), g["Date"].max(), freq="D")
+        g = g.set_index("Date").reindex(days).rename_axis("Date").reset_index()
+        g["City"] = f"segment-{seg}"
+        frames.append(g)
+    df = pd.concat(frames, ignore_index=True)
 
-    # -- 5. Lag / volatility ---------------------------------------------------
-    # Use caller-supplied values if available; otherwise leave NaN for the
-    # in-pipeline imputer to fill with the training-set median.
-    hrs_lag1     = r.HRS_lag1    if r.HRS_lag1    is not None else np.nan
-    hrs_7day_std = r.HRS_7day_std if r.HRS_7day_std is not None else np.nan
+    # Same cleaning and scoring path as pipeline.data.build_clean_frame
+    df = data_mod.causal_forward_fill(df)
+    df = data_mod.add_weight_coverage(df)
+    df["hrs_valid"] = df["weight_coverage"] >= cfg.MIN_ROW_WEIGHT_COVERAGE
+    df = feat.apply_composite_score(df, _ranker)
+    df = feat.add_causal_features(df)
+    df["history_days"] = df.groupby("City").cumcount().clip(upper=_MAX_LOOKBACK_DAYS)
 
-    # -- 6. VOC index ----------------------------------------------------------
-    voc_vals = [v for v in [r.Benzene, r.Toluene, r.Xylene] if v is not None]
-    voc_index = float(sum(voc_vals)) if voc_vals else np.nan
+    out = df[df["_pos"].notna()].sort_values("_pos").reset_index(drop=True)
 
-    voc_observed = 1 if voc_vals else 0
-    weight_coverage = weight_present  # already a 0-1 fraction
+    # Caller-supplied history features fill in only what the request could not
+    if "hrs_lag_1" in out:
+        out["hrs_lag_1"] = out["hrs_lag_1"].fillna(out["_lag1"])
+    if "hrs_std_7" in out:
+        out["hrs_std_7"] = out["hrs_std_7"].fillna(out["_std7"])
+    return out
 
-    # -- 7. Assemble feature row in the exact column order the model expects ---
-    # _features is the FEATURE_COLUMNS list from pipeline/features.py:
-    # ["hrs_mean_3", "hrs_mean_7", "hrs_mean_14", "hrs_mean_30",
-    #  "hrs_std_7",  "hrs_std_14",
-    #  "hrs_lag_1",  "hrs_lag_7",
-    #  "hrs_trend",
-    #  "month_sin", "month_cos", "dow_sin", "dow_cos", "is_winter",
-    #  "voc_index", "voc_observed", "weight_coverage"]
-    #
-    # Rolling features (3/7/14/30-day means, 7/14-day stds, lag-7, trend)
-    # cannot be recovered from a single row — the model's internal SimpleImputer
-    # will fill them with training medians, which degrades accuracy gracefully
-    # but is honest (we document this in the endpoint description).
-    row = {f: np.nan for f in _features}
 
-    # Features we CAN compute from one row
-    row["month_sin"]      = month_sin
-    row["month_cos"]      = month_cos
-    row["dow_sin"]        = dow_sin
-    row["dow_cos"]        = dow_cos
-    row["is_winter"]      = float(is_winter)
-    row["voc_index"]      = voc_index
-    row["voc_observed"]   = float(voc_observed)
-    row["weight_coverage"]= weight_coverage if not np.isnan(weight_coverage) else np.nan
+def _predict(readings: List[PollutantReading]) -> List[PredictionResponse]:
+    _require_model()
+    feats = _build_features(readings)
+    X     = feats[_features]
+    preds = _model.predict(X)
+    proba = _model.predict_proba(X)
 
-    # Lag-1 and 7-day std provided by caller
-    if "hrs_lag_1" in row:
-        row["hrs_lag_1"]   = hrs_lag1
-    if "hrs_std_7" in row:
-        row["hrs_std_7"]   = hrs_7day_std
-
-    return pd.DataFrame([row])[_features], daily_hrs
+    results = []
+    for i, r in enumerate(readings):
+        hrs = feats.at[i, "hrs"]
+        results.append(PredictionResponse(
+            city=r.city,
+            date=r.date,
+            risk_level=str(preds[i]),
+            probabilities={
+                str(cls): round(float(p), 4)
+                for cls, p in zip(_model.classes_, proba[i])
+            },
+            daily_hrs=round(float(hrs), 6) if pd.notna(hrs) else None,
+            history_days=int(feats.at[i, "history_days"]),
+        ))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +274,7 @@ def root():
     """Service ping — always returns 200 even when the model is not loaded."""
     return {
         "service": "Air Quality Health Risk API",
-        "version": "1.1.0",
+        "version": API_VERSION,
         "model_loaded": _model_loaded,
         "docs": "/docs",
     }
@@ -260,14 +288,7 @@ def health():
     Returns 503 if the model artifact cannot be found.
     Run `python train.py --fast` to generate it.
     """
-    if not _model_loaded:
-        raise HTTPException(
-            503,
-            detail=(
-                f"Model not loaded: {_load_error}. "
-                "Run `python train.py --fast` to generate artifacts/model.joblib."
-            ),
-        )
+    _require_model()
     return {
         "status":          "ok",
         "model":           "RandomForestClassifier",
@@ -290,28 +311,16 @@ def predict(reading: PollutantReading):
     Predict the **next-week** air-pollution health risk for a single city-day.
 
     ### Notes on accuracy
-    Rolling features (3/7/14/30-day means, lag-7, trend) **cannot** be
-    computed from a single reading — they require the preceding days'
-    history. The model's internal imputer fills them with training-set medians,
-    which produces reasonable predictions but is less accurate than providing
-    full time-series context via `/predict/batch`.
+    The model's strongest features are 3/7/14/30-day rolling means of the
+    exposure score, which **cannot** be computed from a single reading. They
+    are filled with training-set medians, so a lone reading mostly reflects
+    the season and the supplied `HRS_lag1` / `HRS_7day_std`.
 
-    Supply `HRS_lag1` and `HRS_7day_std` if you have pre-computed them.
+    For real forecasts send the preceding 30 days of the city to
+    `/predict/batch`; the response's `history_days` shows how much history
+    each prediction actually had.
     """
-    X, daily_hrs = _build_feature_row(reading)
-    pred         = _model.predict(X)[0]
-    proba        = _model.predict_proba(X)[0]
-    proba_dict   = {
-        cls: round(float(p), 4)
-        for cls, p in zip(_model.classes_, proba)
-    }
-    return PredictionResponse(
-        city=reading.city,
-        date=reading.date,
-        risk_level=pred,
-        probabilities=proba_dict,
-        daily_hrs=round(float(daily_hrs), 6) if not np.isnan(daily_hrs) else None,
-    )
+    return _predict([reading])[0]
 
 
 @app.post(
@@ -324,23 +333,12 @@ def predict_batch(payload: BatchRequest):
     """
     Predict health risk levels for a **list** of city-day readings in one call.
 
-    Readings do **not** need to be for the same city or consecutive dates.
-    Maximum batch size: 500.
+    Readings are grouped by `city` and ordered by `date`. Each reading's
+    rolling, lag and volatility features are computed from that reading and
+    the **earlier** readings of the same city in the request — never later
+    ones — exactly as during training. Readings may mix cities and need not be
+    consecutive; missing days are treated as unmeasured.
+
+    Results are returned in request order. Maximum batch size: 500.
     """
-    results = []
-    for r in payload.readings:
-        X, daily_hrs = _build_feature_row(r)
-        pred         = _model.predict(X)[0]
-        proba        = _model.predict_proba(X)[0]
-        proba_dict   = {
-            cls: round(float(p), 4)
-            for cls, p in zip(_model.classes_, proba)
-        }
-        results.append(PredictionResponse(
-            city=r.city,
-            date=r.date,
-            risk_level=pred,
-            probabilities=proba_dict,
-            daily_hrs=round(float(daily_hrs), 6) if not np.isnan(daily_hrs) else None,
-        ))
-    return BatchResponse(results=results)
+    return BatchResponse(results=_predict(payload.readings))

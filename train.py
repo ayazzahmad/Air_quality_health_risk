@@ -33,7 +33,7 @@ from pipeline.models import full_report, tune_random_forest
 def main(data_path: str, out_path: str, fast: bool = False) -> None:
     # ── 1. Load & clean (causal imputation, quality gates) ───────────────────
     print(f"[train] Loading {data_path}")
-    df, audit = build_clean_frame()
+    df, audit = build_clean_frame(data_path)
     print(f"[train] Cities retained : {len(audit['cities_retained'])}")
     print(f"[train] Rows retained   : {audit['rows_retained']}")
 
@@ -55,6 +55,9 @@ def main(data_path: str, out_path: str, fast: bool = False) -> None:
     ok       = df.dropna(subset=required + ["target_exposure"])
     train    = ok[ok["Date"] <  train_cut]
     test     = ok[ok["Date"] >= test_start]
+    # Date order, as in tune_random_forest: the forest's bootstrap samples
+    # depend on row order, so this keeps --fast identical to the tuned refit.
+    train    = train.iloc[np.argsort(train["Date"].to_numpy(), kind="stable")]
     print(f"[train] Train rows: {len(train)}  |  Test rows: {len(test)}")
 
     # ── 6. Risk thresholds from TRAIN only ────────────────────────────────────
@@ -67,7 +70,7 @@ def main(data_path: str, out_path: str, fast: bool = False) -> None:
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.impute import SimpleImputer
         from sklearn.pipeline import Pipeline
-        print("[train] Fast mode — using best known params (no grid search)")
+        print("[train] Fast mode - using best known params (no grid search)")
         model = Pipeline([
             ("impute", SimpleImputer(strategy="median")),
             ("clf", RandomForestClassifier(
@@ -78,7 +81,7 @@ def main(data_path: str, out_path: str, fast: bool = False) -> None:
         ])
         model.fit(train[FEATURE_COLUMNS], y_train)
     else:
-        print("[train] Running grid-search (this takes a few minutes) …")
+        print("[train] Running grid-search (this takes a few minutes) ...")
         search = tune_random_forest(
             train[FEATURE_COLUMNS], y_train, train["Date"]
         )
@@ -101,13 +104,14 @@ def main(data_path: str, out_path: str, fast: bool = False) -> None:
         "model":         model,
         "ranker":        ranker,
         "features":      FEATURE_COLUMNS,
-        "classes":       cfg.RISK_LABELS,
+        # The model's own class order, i.e. the column order of predict_proba
+        "classes":       [str(c) for c in model.classes_],
         "low_th":        lo,
         "high_th":       hi,
         "test_metrics":  report["test"],
     }
     joblib.dump(artifact, out_path)
-    print(f"[train] Saved → {out_path}")
+    print(f"[train] Saved -> {out_path}")
 
 
 if __name__ == "__main__":

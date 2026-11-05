@@ -116,7 +116,7 @@ def add_causal_features(df: pd.DataFrame) -> pd.DataFrame:
     # despite being adjacent seasons, which is actively misleading for a linear
     # model.
     month = df["Date"].dt.month
-    dow = df["Date"].dt.dayofweek
+    dow = df["Date"].dt.day_of_week
     df["month_sin"] = np.sin(2 * np.pi * month / 12)
     df["month_cos"] = np.cos(2 * np.pi * month / 12)
     df["dow_sin"] = np.sin(2 * np.pi * dow / 7)

@@ -10,9 +10,12 @@ import pandas as pd
 from . import config as cfg
 
 
-def load_raw() -> pd.DataFrame:
-    """Load the raw city-day table and enforce basic structural guarantees."""
-    df = pd.read_csv(cfg.DATA_PATH)
+def load_raw(path=None) -> pd.DataFrame:
+    """Load the raw city-day table and enforce basic structural guarantees.
+
+    `path` defaults to `config.DATA_PATH`.
+    """
+    df = pd.read_csv(path or cfg.DATA_PATH)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
     df = df.sort_values(["City", "Date"]).reset_index(drop=True)
@@ -114,9 +117,9 @@ def apply_quality_gates(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return df.sort_values(["City", "Date"]).reset_index(drop=True), report
 
 
-def build_clean_frame() -> tuple[pd.DataFrame, dict]:
+def build_clean_frame(path=None) -> tuple[pd.DataFrame, dict]:
     """Full cleaning path, returning the frame and an audit report."""
-    df = load_raw()
+    df = load_raw(path)
     contiguity = check_date_contiguity(df)
 
     df = mask_impossible_values(df)

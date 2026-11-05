@@ -1,17 +1,14 @@
 __pycache__/
 *.py[cod]
-*.pyc
 .venv/
 venv/
 .env
+.pytest_cache/
 # Regenerated artifacts — not worth versioning the binary
 artifacts/
-!artifacts/README.md
 *.joblib
 # Notebook checkpoints
 notebooks/.ipynb_checkpoints/
-# Results images (reproduced by running the notebook)
-results/*.png
 # Windows junk
 desktop.ini
 Thumbs.db

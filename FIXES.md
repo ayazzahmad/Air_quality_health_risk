@@ -16,12 +16,12 @@ git show d73d3d2:notebooks/air_quality_health_risk_analysis.ipynb > original.ipy
 | # | Defect | Original | Fix |
 |---|---|---|---|
 | 1 | **Target reconstructed from its own components.** Label was quantile-binned `HRS_7day` = mean(HRS[t-6…t]); features were `HRS_3day` (subset of that window), `HRS_lag1` (inside it) and `HRS_7day_std` (same window). Importances confirmed it: `HRS_3day` 0.457 + `HRS_lag1` 0.302 = 76%. | cells 31–45 | Reframed as genuine forecasting. Label is mean exposure over **t+1 … t+7**; every feature ends at **t**. Zero window overlap. `features.add_forward_target`, `features.add_causal_features` |
-| 2 | **Split was city-based, not temporal.** `train_test_split(shuffle=False)` on a frame sorted by `['City','Date']` takes the alphabetically-last cities entire, not the latest dates. No temporal validation at all, in a project premised on temporal exposure. | cells 8, 48 | Global date cutoff (`TEST_START`), so train is strictly earlier than test and every city appears in both. `run.main` step 2 |
+| 2 | **Split was city-based, not temporal.** `train_test_split(shuffle=False)` on a frame sorted by `['City','Date']` takes the alphabetically-last cities entire, not the latest dates. No temporal validation at all, in a project premised on temporal exposure. | cells 8, 48 | Global date cutoff (`TEST_START`), so train is strictly earlier than test and every city appears in both. Notebook §2, `train.py` step 2 |
 | 3a | **Label thresholds fitted on the full dataset**, leaking the test distribution into the label definition. | cell 39 | `features.fit_risk_thresholds` is called on training rows only, then reused unchanged on test. |
 | 3b | **`MinMaxScaler` fitted on the full dataset** before the split. | cell 28 | `features.fit_pollutant_ranker` fits on training rows only. |
 | 3c | **`X.fillna(X.median())` computed on the full dataset** before the split. | cell 46 | `SimpleImputer` lives inside the sklearn `Pipeline`, so it is refitted per training fold. `models.build_logistic`, `models.build_random_forest` |
 | 4 | **No baseline.** 89% was reported against nothing. | — | Two baselines reported alongside every model: majority-class, and **persistence** ("next week looks like this week"), which is the real bar for a forecaster. `models.majority_baseline`, `models.persistence_baseline` |
-| 5 | **No embargo.** Even with a date split, a training row's label window would have reached into the test period. | — | Training rows within `EMBARGO_DAYS` of the cutoff are discarded, so no training label is built from a test-period day. `run.main` step 2 |
+| 5 | **No embargo.** Even with a date split, a training row's label window would have reached into the test period. | — | Training rows within `EMBARGO_DAYS` of the cutoff are discarded, so no training label is built from a test-period day. Notebook §2, `train.py` step 2 |
 
 ## Tier 2 — substantive method problems
 
@@ -45,7 +45,7 @@ git show d73d3d2:notebooks/air_quality_health_risk_analysis.ipynb > original.ipy
 | 16 | *"Balanced class distribution (~33% each)"* stated as a property of the data — it is a tautology of binning at the 0.33/0.66 quantiles. | Stated as a design choice; train→test class drift is reported explicitly. |
 | 17 | *"Maintained strict temporal ordering to prevent leakage"* — contradicted by defect #2. | Corrected; the actual split is documented with dates. |
 | 18 | Limitations section listed only non-methodological caveats, omitting every issue above. | Rewritten to lead with the methodological limits that remain. |
-| 19 | COVID-19 lockdown sits inside the evaluation window and sharply changed air quality — never acknowledged. | Test metrics reported split around `2020-03-25`. `run.main` step 7 |
+| 19 | COVID-19 lockdown sits inside the evaluation window and sharply changed air quality — never acknowledged. | Test metrics reported split around `2020-03-25`. Notebook §8 |
 
 ## Tier 4 — reproducibility
 
@@ -54,6 +54,6 @@ git show d73d3d2:notebooks/air_quality_health_risk_analysis.ipynb > original.ipy
 | 20 | **A fresh top-to-bottom run crashed.** Cell 24 plotted `Health_Risk_Score`/`HRS_7day`, created at cells 29/31. Proof of out-of-order execution: cell 6 — in Section 1 — printed a column list already containing `Health_Risk_Level` and `HRS_7day_std`, created at cells 40/44. | Notebook rewritten to run linearly from a clean kernel over importable modules in `pipeline/`, and committed with its outputs. |
 | 21 | **Hardcoded absolute path** `C:\Users\ayazp\Downloads\...` while the repo ships `data/city_day.csv`. | Relative paths resolved from the package root. `config.PROJECT_ROOT` |
 | 22 | **`!pip install scikit-learn` inside the notebook**; no `requirements.txt`. | `requirements.txt` added; no installs in code. |
-| 23 | **No saved model artifact** (`results/` held only PNGs). | Model, ranker and thresholds persisted to `results/model.joblib`; all metrics to `results/metrics.json`. |
+| 23 | **No saved model artifact** (`results/` held only PNGs). | `train.py` persists model, ranker, thresholds and test metrics to `artifacts/model.joblib` (served by the FastAPI app); the reference run's metrics and figures are committed in `results/`. |
 | 24 | **Error analysis was `errors.head()`** — five printed rows, no aggregation. | Confusion matrix, per-class report, permutation importance, and the regime split. |
 | 25 | **Notebook hygiene:** Section 4 (Feature Engineering) came *after* Section 3 (EDA) plotted those same engineered features; `pollutants` defined twice (18, 20); `city_counts` twice (13, 14); columns printed twice (5, 6); dead exploratory cells (12, 15, 36, 41, 42). | Removed; each step is a named function with a single responsibility. |

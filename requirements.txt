@@ -1,7 +1,9 @@
-pandas>=2.0
-numpy>=1.24
-scikit-learn>=1.3
-matplotlib>=3.7
-seaborn>=0.12
-joblib>=1.3
-
+# Training, verification and the analysis notebook.
+# numpy / pandas / scikit-learn / joblib are pinned to the same versions as
+# requirements-api.txt: the saved model is a pickle and must be loaded by the
+# scikit-learn version that created it.
+numpy==2.5.4
+pandas==3.1.1
+scikit-learn==1.9.1
+joblib==1.6.0
+matplotlib==3.11.2

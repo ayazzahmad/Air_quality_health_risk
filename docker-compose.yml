@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   api:
     build:
@@ -9,18 +7,19 @@ services:
     image: air-quality-risk-api:latest
     container_name: air_quality_api
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     environment:
-      - MODEL_PATH=artifacts/model.joblib
+      # Read from .env when present (see .env.example)
+      - MODEL_PATH=${MODEL_PATH:-artifacts/model.joblib}
     # Optional: mount a local artifacts folder so you can update the model
     # without rebuilding the image.
     # volumes:
     #   - ./artifacts:/app/artifacts:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # python:slim has no curl, so use the standard library
+      test: ["CMD", "python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status == 200 else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 20s
-
