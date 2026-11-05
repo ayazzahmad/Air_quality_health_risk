@@ -298,7 +298,7 @@ def _predict(readings: List[PollutantReading]) -> List[PredictionResponse]:
             risk_level=str(preds[i]),
             probabilities={
                 str(cls): round(float(p), 4)
-                for cls, p in zip(_model.classes_, proba[i])
+                for cls, p in zip(_model.classes_, proba[i], strict=True)
             },
             daily_hrs=round(float(hrs), 6) if pd.notna(hrs) else None,
             history_days=int(feats.at[i, "history_days"]),
