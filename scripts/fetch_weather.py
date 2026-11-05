@@ -144,8 +144,8 @@ def main() -> int:
         time.sleep(1)  # stay well inside the free API's rate limits
 
     weather = pd.concat(frames, ignore_index=True)
-    weather.to_csv(OUT_DAILY, index=False)
-    pd.DataFrame(locations).to_csv(OUT_LOCATIONS, index=False)
+    weather.to_csv(OUT_DAILY, index=False, lineterminator="\n")
+    pd.DataFrame(locations).to_csv(OUT_LOCATIONS, index=False, lineterminator="\n")
     print(f"Saved {len(weather):,} rows -> {OUT_DAILY.relative_to(PROJECT_ROOT)}")
     return 0
 
