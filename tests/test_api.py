@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main_mod
+from pipeline import features as feat
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +35,17 @@ class _MockPipeline:
 
     def predict_proba(self, X):
         return np.tile([0.15, 0.70, 0.15], (len(X), 1))
+
+
+class _MockRegressor:
+    """Predicts a constant +0.1 change in exposure."""
+
+    def __init__(self):
+        self.last_X = None
+
+    def predict(self, X):
+        self.last_X = X
+        return np.full(len(X), 0.1)
 
 
 class _MockRanker:
@@ -61,6 +73,9 @@ _MOCK_ARTIFACT = {
     "low_th":       0.4032,
     "high_th":      0.5935,
     "test_metrics": {"accuracy": 0.751, "macro_f1": 0.756},
+    "regressor":          _MockRegressor(),
+    "regressor_features": feat.EXPOSURE_FEATURES,
+    "regressor_metrics":  {"mae": 0.0618, "mae_persistence": 0.0693},
 }
 
 
@@ -79,6 +94,9 @@ def client():
         mp.setattr(main_mod, "_low_th",       _MOCK_ARTIFACT["low_th"], raising=False)
         mp.setattr(main_mod, "_high_th",      _MOCK_ARTIFACT["high_th"], raising=False)
         mp.setattr(main_mod, "_test_metrics", _MOCK_ARTIFACT["test_metrics"], raising=False)
+        mp.setattr(main_mod, "_regressor",    _MOCK_ARTIFACT["regressor"], raising=False)
+        mp.setattr(main_mod, "_reg_features", _MOCK_ARTIFACT["regressor_features"], raising=False)
+        mp.setattr(main_mod, "_reg_metrics",  _MOCK_ARTIFACT["regressor_metrics"], raising=False)
         mp.setattr(main_mod, "_model_loaded", True)
         yield TestClient(main_mod.app)
 
@@ -295,3 +313,56 @@ def test_503_when_model_missing(monkeypatch):
     assert c.get("/").status_code == 200
     assert c.get("/health").status_code == 503
     assert c.post("/predict", json={"date": "2020-01-15", "city": "Delhi"}).status_code == 503
+
+
+class TestExposureForecast:
+    @staticmethod
+    def _series(n_days, **weather):
+        start = dt.date(2020, 1, 1)
+        return [
+            {"date": str(start + dt.timedelta(days=i)), "city": "Delhi",
+             "PM2.5": 90, "PM10": 150, "NO2": 40, "SO2": 10, "CO": 1.5, "O3": 30,
+             **weather}
+            for i in range(n_days)
+        ]
+
+    def test_health_reports_forecast(self, client):
+        body = client.get("/health").json()["exposure_forecast"]
+        assert body["available"] is True
+        assert body["n_features"] == len(feat.EXPOSURE_FEATURES)
+
+    def test_single_reading_has_no_forecast(self, client):
+        body = client.post("/predict", json=self._series(1)[0]).json()
+        assert body["forecast_exposure"] is None
+
+    def test_forecast_needs_seven_days_of_history(self, client):
+        body = client.post("/predict/batch", json={"readings": self._series(8)}).json()
+        forecasts = [r["forecast_exposure"] for r in body["results"]]
+        assert forecasts[:6] == [None] * 6
+        # mock: every day scores 0.5, regressor adds +0.1
+        assert forecasts[6:] == [pytest.approx(0.6), pytest.approx(0.6)]
+
+    def test_weather_reaches_the_regressor(self, client):
+        readings = self._series(8, wind_mean=4.0, precip_sum=0.0, wind_dir=90)
+        client.post("/predict/batch", json={"readings": readings})
+        X = main_mod._regressor.last_X
+        assert X.iloc[-1]["wind_mean_7d"] == pytest.approx(4.0)
+        assert X.iloc[-1]["calm_dry_days_7"] == pytest.approx(7.0)
+        assert X.iloc[-1]["wind_dir_sin_3"] == pytest.approx(1.0)
+
+    def test_weather_is_optional(self, client):
+        client.post("/predict/batch", json={"readings": self._series(8)})
+        assert main_mod._regressor.last_X["wind_mean_7d"].isna().all()
+
+    def test_invalid_weather_422(self, client):
+        r = client.post("/predict", json={**self._series(1)[0], "humidity_mean": 150})
+        assert r.status_code == 422
+
+
+def test_artifact_without_regressor(client, monkeypatch):
+    # Artifacts trained before v1.3 have no regressor; the API still serves
+    monkeypatch.setattr(main_mod, "_regressor", None)
+    readings = TestExposureForecast._series(8)
+    body = client.post("/predict/batch", json={"readings": readings}).json()
+    assert all(r["forecast_exposure"] is None for r in body["results"])
+    assert client.get("/health").json()["exposure_forecast"]["available"] is False

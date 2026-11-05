@@ -211,8 +211,11 @@ ORACLE_WEATHER_FEATURES = [
     f"{v}_next_{cfg.LABEL_HORIZON_DAYS}" for v in cfg.WEATHER_FEATURE_VARS
 ]
 
-# The production feature set
+# Production feature sets. Past weather adds nothing measurable to the risk
+# classifier (CV macro F1 0.775 -> 0.776), but ~20% to the R^2 of the
+# next-week exposure forecast (0.147 -> 0.178), so only the regressor uses it.
 FEATURE_COLUMNS = POLLUTION_FEATURES
+EXPOSURE_FEATURES = POLLUTION_FEATURES + WEATHER_FEATURES
 
 
 # --- Forward-looking label ---------------------------------------------------
