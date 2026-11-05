@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, tests, leakage checks, training
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-api.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-api.txt pytest==9.2.0 httpx==0.28.1 ruff
+
+      - name: Lint (correctness rules, see ruff.toml)
+        run: ruff check .
+
+      - name: API tests
+        run: pytest tests -v
+
+      - name: Leakage invariants
+        run: python verify_no_leakage.py
+
+      - name: Train both models
+        run: python train.py --fast --out artifacts/model.joblib
+
+      - name: Real-model smoke test
+        run: |
+          python - <<'EOF'
+          from fastapi.testclient import TestClient
+          import app.main as m
+
+          assert m._model_loaded, m._load_error
+          c = TestClient(m.app)
+          health = c.get("/health").json()
+          assert health["exposure_forecast"]["available"]
+          assert health["test_metrics"]["macro_f1"] > 0.74, health["test_metrics"]
+          r = c.post("/predict", json={"date": "2020-01-15", "city": "Delhi", "PM2.5": 98.4})
+          assert r.status_code == 200, r.text
+          print("ok:", r.json())
+          EOF
+
+  docker:
+    name: Docker build and container smoke test
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (trains the model inside)
+        run: docker build -t air-quality-risk-api .
+
+      - name: Start container and wait for /health
+        run: |
+          docker run -d -p 8000:8000 --name api air-quality-risk-api
+          for i in $(seq 1 30); do
+            if curl -fs localhost:8000/health > /dev/null; then
+              echo "healthy after ~$((i * 2))s"; exit 0
+            fi
+            sleep 2
+          done
+          docker logs api
+          exit 1
+
+      - name: Predict through the container
+        run: |
+          curl -fs -X POST localhost:8000/predict \
+            -H "Content-Type: application/json" \
+            -d '{"date": "2020-01-15", "city": "Delhi", "PM2.5": 98.4, "PM10": 152, "NO2": 43.1}'
+          echo
+          status=$(curl -s -o /dev/null -w "%{http_code}" -X POST localhost:8000/predict \
+            -H "Content-Type: application/json" -d '{"date": "not-a-date", "city": "Delhi"}')
+          test "$status" = "422"
+
+      - name: Container logs
+        if: always()
+        run: docker logs api || true

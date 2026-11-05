@@ -429,8 +429,18 @@ pytest tests/ -v              # API tests (no trained model needed)
 python verify_no_leakage.py   # anti-leakage invariants on the real data
 ```
 
+**Continuous integration.** [GitHub Actions](.github/workflows/ci.yml) runs on
+every push and pull request:
+
+1. lint ([ruff](ruff.toml), correctness rules only);
+2. the API tests;
+3. the leakage checks;
+4. training both models, then a smoke test against the real model;
+5. building the Docker image (which trains inside it), starting the container,
+   waiting for `/health`, and sending real requests through it.
+
 **API tests** ([`tests/test_api.py`](tests/test_api.py)) use a mock artifact,
-so they run in CI before any training. They cover the endpoint contracts,
+so they run before any training. They cover the endpoint contracts,
 input validation, the 503 path, request ordering, per-city isolation, causal
 use of history in batch requests, and the exposure forecast (weather inputs,
 the 7-day history requirement, and loading older artifacts that have no
@@ -481,6 +491,8 @@ leak rather than passing by default.
 ├── results/                    metrics, figures and run log from the reference run
 ├── train.py                    CLI: train both models, save artifacts/model.joblib
 ├── verify_no_leakage.py        executable checks of the core invariants
+├── .github/workflows/ci.yml    CI: lint, tests, leakage checks, training, Docker
+├── ruff.toml                   lint configuration
 ├── Dockerfile                  two stages: train, then serve
 ├── docker-compose.yml
 ├── requirements.txt            training and notebook
