@@ -117,8 +117,30 @@ def apply_quality_gates(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return df.sort_values(["City", "Date"]).reset_index(drop=True), report
 
 
-def build_clean_frame(path=None) -> tuple[pd.DataFrame, dict]:
-    """Full cleaning path, returning the frame and an audit report."""
+def load_weather(path=None) -> pd.DataFrame:
+    """Load daily weather (one row per City, Date); `path` defaults to
+    `config.WEATHER_PATH`."""
+    weather = pd.read_csv(path or cfg.WEATHER_PATH, parse_dates=["Date"])
+    if weather.duplicated(["City", "Date"]).any():
+        raise ValueError("Duplicate (City, Date) rows in the weather data.")
+    weather = weather[["City", "Date"] + cfg.WEATHER_COLUMNS]
+    return weather.astype({c: float for c in cfg.WEATHER_COLUMNS})
+
+
+def merge_weather(df: pd.DataFrame, weather: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    """Left-join weather onto the pollution frame. Returns (df, coverage),
+    where coverage is the fraction of rows that received weather."""
+    out = df.merge(weather, on=["City", "Date"], how="left", validate="one_to_one")
+    coverage = float(out[cfg.WEATHER_COLUMNS].notna().all(axis=1).mean())
+    return out, coverage
+
+
+def build_clean_frame(path=None, weather_path=None) -> tuple[pd.DataFrame, dict]:
+    """Full cleaning path, returning the frame and an audit report.
+
+    Weather is joined after the quality gates, which depend on pollution
+    coverage only.
+    """
     df = load_raw(path)
     contiguity = check_date_contiguity(df)
 
@@ -126,6 +148,7 @@ def build_clean_frame(path=None) -> tuple[pd.DataFrame, dict]:
     df = causal_forward_fill(df)
     df = add_weight_coverage(df)
     df, report = apply_quality_gates(df)
+    df, report["weather_coverage"] = merge_weather(df, load_weather(weather_path))
 
     report["max_calendar_gap_days"] = int(contiguity["missing_days"].max())
-    return df, report
+    return df.sort_values(["City", "Date"]).reset_index(drop=True), report
