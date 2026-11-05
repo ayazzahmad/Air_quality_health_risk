@@ -283,6 +283,35 @@ download it again from Open-Meteo:
 python scripts/fetch_weather.py
 ```
 
+**Track experiments with MLflow (optional).** Add `--mlflow` to any training
+run to log it:
+
+- **Parameters:** mode, feature sets, risk thresholds, hyperparameters.
+- **Metrics:** both models' test metrics next to their persistence baselines,
+  plus cross-validation scores for grid-search runs.
+- **The git commit**, and whether there were uncommitted changes.
+- **The trained model file.**
+
+`--exposure-features pollution` reruns the exposure forecast without weather,
+so the weather ablation can be replayed and compared side by side:
+
+```bash
+python train.py --fast --mlflow                                  # production: pollution + weather
+python train.py --fast --mlflow --exposure-features pollution \
+                --out artifacts/model_pollution.joblib           # ablation: pollution only
+mlflow ui --backend-store-uri sqlite:///mlflow.db                # browse at http://localhost:5000
+```
+
+| Run | Exposure features | Test MAE | Error vs "no change" | R² of change |
+|---|---|---|---|---|
+| `fast-pollution` | 17 | 0.0633 | −8.7% | 0.180 |
+| `fast-weather` | 36 | 0.0618 | −10.7% | 0.207 |
+
+Runs are stored locally in `mlflow.db`, with model files under `mlruns/`. Both
+are git-ignored. To log to an MLflow server instead, set `MLFLOW_TRACKING_URI`.
+MLflow is only needed for tracking, so it's in `requirements-dev.txt` and is
+not installed in the Docker images.
+
 **Serve it.**
 
 ```bash
@@ -505,7 +534,8 @@ leak rather than passing by default.
 │   ├── config.py               every tunable constant and split date
 │   ├── data.py                 loading, cleaning, data-quality gates
 │   ├── features.py             composite score, causal features, forward label
-│   └── models.py               baselines, models, tuning, evaluation
+│   ├── models.py               baselines, models, tuning, evaluation
+│   └── tracking.py             optional MLflow run logging (train.py --mlflow)
 ├── notebooks/
 │   └── air_quality_health_risk_analysis.ipynb   the full analysis, with outputs
 ├── tests/
@@ -526,7 +556,7 @@ leak rather than passing by default.
 ├── render.yaml                 Render Blueprint for the public deployment
 ├── requirements.txt            training and notebook
 ├── requirements-api.txt        serving
-├── requirements-dev.txt        everything, plus pytest and Jupyter
+├── requirements-dev.txt        everything, plus pytest, Jupyter and MLflow
 └── FIXES.md                    every defect in the original, and its fix
 ```
 

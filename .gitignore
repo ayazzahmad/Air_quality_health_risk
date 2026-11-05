@@ -12,3 +12,7 @@ notebooks/.ipynb_checkpoints/
 # Windows junk
 desktop.ini
 Thumbs.db
+# MLflow local tracking store and run artifacts (train.py --mlflow)
+mlflow.db
+mlruns/
+mlartifacts/

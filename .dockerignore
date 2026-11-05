@@ -15,3 +15,7 @@ results/
 tests/
 .env.example
 *.md
+# MLflow local tracking
+mlflow.db
+mlruns/
+mlartifacts/
